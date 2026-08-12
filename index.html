@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0A0D1A" />
+<title>The Ledger</title>
+<style>
+  :root {
+    --bg: #0A0D1A; --surface: #141827; --elevated: #1E2235;
+    --accent: #E63946; --gold: #F4A261; --pos: #2A9D8F;
+    --text: #FFFFFF; --subtext: #9EA8B8; --border: #262c40;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  button { font: inherit; cursor: pointer; }
+  input, select { font: inherit; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 16px 96px; }
+
+  /* Header */
+  header.app {
+    position: sticky; top: 0; z-index: 20; background: var(--bg);
+    padding: 14px 16px 10px; border-bottom: 1px solid var(--border);
+  }
+  header.app .row { display: flex; align-items: center; gap: 10px; max-width: 720px; margin: 0 auto; }
+  header.app h1 { font-size: 20px; margin: 0; flex: 1; font-weight: 700; letter-spacing: .2px; }
+  header.app .sub { color: var(--subtext); font-size: 13px; }
+  .pill {
+    background: var(--elevated); border: 1px solid var(--border); color: var(--subtext);
+    border-radius: 999px; padding: 6px 12px; font-size: 13px; font-weight: 600;
+  }
+  .btn {
+    border: none; border-radius: 999px; padding: 10px 16px; font-weight: 700;
+    background: var(--accent); color: #fff;
+  }
+  .btn.ghost { background: var(--elevated); color: var(--text); border: 1px solid var(--border); }
+  .btn.block { display: block; width: 100%; padding: 14px; font-size: 16px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.small { padding: 7px 12px; font-size: 13px; }
+
+  /* Tabs */
+  nav.tabs {
+    display: flex; gap: 6px; max-width: 720px; margin: 10px auto 0; padding: 0 16px;
+    position: sticky; top: 56px; z-index: 15; background: var(--bg);
+  }
+  nav.tabs button {
+    flex: 1; background: transparent; color: var(--subtext); border: none;
+    padding: 12px 4px; font-weight: 700; font-size: 14px; border-bottom: 2px solid transparent;
+  }
+  nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* Cards / lists */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px; margin-top: 12px;
+  }
+  .row-item {
+    display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-top: 8px;
+  }
+  .row-item .grow { flex: 1; min-width: 0; }
+  .muted { color: var(--subtext); font-size: 13px; }
+  .money { color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pos { color: var(--pos); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .neg { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .zero { color: var(--subtext); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { text-align: center; color: var(--subtext); padding: 40px 20px; }
+  .empty .big { font-size: 40px; }
+  .iconbtn {
+    background: transparent; border: none; color: var(--subtext); font-size: 18px; padding: 6px 8px;
+  }
+  .crown { color: var(--gold); }
+
+  /* Inputs */
+  label.field { display: block; margin-top: 12px; font-size: 13px; color: var(--subtext); }
+  input.inp, select.inp {
+    width: 100%; margin-top: 6px; padding: 12px; border-radius: 10px;
+    background: var(--elevated); border: 1px solid var(--border); color: var(--text);
+  }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .stepper { display: flex; align-items: center; gap: 8px; }
+  .stepper button {
+    width: 38px; height: 38px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--elevated); color: var(--text); font-size: 20px; font-weight: 700;
+  }
+  .stepper .val { min-width: 64px; text-align: center; font-weight: 700; color: var(--gold); }
+
+  .check {
+    display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: 10px;
+    background: var(--elevated); border: 1px solid var(--border); margin-top: 8px;
+  }
+  .check.sel { border-color: var(--accent); }
+  .check .box { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--subtext); flex: none; }
+  .check.sel .box { border-color: var(--accent); background: var(--accent); }
+  .check .grow { flex: 1; }
+  .payin { width: 96px; }
+
+  .fab {
+    position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
+    width: 58px; height: 58px; border-radius: 50%; background: var(--accent); color: #fff;
+    font-size: 30px; line-height: 58px; text-align: center; border: none; box-shadow: 0 6px 16px rgba(0,0,0,.4);
+    z-index: 30;
+  }
+
+  /* Modal */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40;
+    display: flex; align-items: flex-end; justify-content: center;
+  }
+  .modal {
+    background: var(--bg); width: 100%; max-width: 720px; max-height: 92vh; overflow-y: auto;
+    border-radius: 18px 18px 0 0; border-top: 1px solid var(--border); padding: 16px 16px 28px;
+  }
+  @media (min-width: 640px) { .modal-bg { align-items: center; } .modal { border-radius: 18px; } }
+  .modal h2 { margin: 4px 0 2px; font-size: 18px; }
+  .modal .bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .modal .bar .grow { flex: 1; }
+  .section-h { margin-top: 18px; font-size: 13px; color: var(--subtext); font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+  .balance-ok { color: var(--pos); font-weight: 700; }
+  .balance-off { color: var(--accent); font-weight: 700; }
+  .toast {
+    position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%);
+    background: var(--elevated); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 16px; border-radius: 999px; z-index: 60; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,.4);
+  }
+  a { color: var(--gold); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+const SUPABASE_URL = 'https://vmambvgovdxepgejdgcy.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZtYW1idmdvdmR4ZXBnZWpkZ2N5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY0ODczNDEsImV4cCI6MjEwMjA2MzM0MX0.oj4Tgbg-Y7mTiaB7QCAl2vx9WsxvJXJ4RV_AnhP4h0w';
+// window.__LEDGER_DB__ lets tests inject a mock backend and skip the network entirely.
+// In production the Supabase client is loaded from a CDN (the app needs internet for
+// live sync regardless, so this adds no new offline failure mode).
+let db = window.__LEDGER_DB__;
+if (!db) {
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+  db = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { realtime: { params: { eventsPerSecond: 5 } } });
+}
+
+// The Ledger — settlement engine.
+//
+// Pure functions, no dependencies. This is the single source of truth for the
+// who-owes-whom math; it is imported by the Node tests and inlined into
+// index.html at build time. All money is whole-dollar integers.
+
+// Net balance per player across a set of game lines.
+// lines: [{ name, contribution, payout }]
+// Returns { [name]: net } where net = sum(payout - contribution).
+// Positive = the player is owed money; negative = the player owes.
+function netBalances(lines) {
+  const balances = {};
+  for (const l of lines) {
+    balances[l.name] = (balances[l.name] ?? 0) + (l.payout - l.contribution);
+  }
+  return balances;
+}
+
+// Minimize the number of payments that settle everyone.
+// Greedy max-creditor / max-debtor: repeatedly match the person owed the most
+// with the person who owes the most, settling the smaller amount each time.
+// Produces at most (n - 1) payments. Deterministic (ties broken by name).
+// Returns [{ from, to, amount }] (from pays to).
+function minimize(balances) {
+  const cmp = (a, b) =>
+    a.amount !== b.amount ? b.amount - a.amount : a.name < b.name ? -1 : 1;
+
+  const creditors = Object.entries(balances)
+    .filter(([, v]) => v > 0)
+    .map(([name, amount]) => ({ name, amount }))
+    .sort(cmp);
+  const debtors = Object.entries(balances)
+    .filter(([, v]) => v < 0)
+    .map(([name, amount]) => ({ name, amount: -amount }))
+    .sort(cmp);
+
+  const payments = [];
+  let ci = 0;
+  let di = 0;
+  while (ci < creditors.length && di < debtors.length) {
+    const pay = Math.min(creditors[ci].amount, debtors[di].amount);
+    if (pay > 0) {
+      payments.push({ from: debtors[di].name, to: creditors[ci].name, amount: pay });
+    }
+    creditors[ci].amount -= pay;
+    debtors[di].amount -= pay;
+    if (creditors[ci].amount === 0) ci++;
+    if (debtors[di].amount === 0) di++;
+  }
+  return payments;
+}
+
+// Sum of all balances. 0 for a well-formed trip; nonzero means some game's pot
+// was entered unbalanced.
+function residual(balances) {
+  return Object.values(balances).reduce((a, b) => a + b, 0);
+}
+
+// ---------- helpers ----------
+const $ = (sel, el = document) => el.querySelector(sel);
+const el = (tag, props = {}, kids = []) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'html') n.innerHTML = v;
+    else if (k === 'text') n.textContent = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const kid of [].concat(kids)) if (kid) n.append(kid);
+  return n;
+};
+const money = (n) => {
+  const s = n < 0 ? '-' : '';
+  return s + '$' + Math.abs(n).toLocaleString('en-US');
+};
+const signed = (n) => (n > 0 ? '+' : '') + money(n);
+const fmtTime = (iso) =>
+  new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function toast(msg) {
+  const t = el('div', { class: 'toast', text: msg });
+  document.body.append(t);
+  setTimeout(() => t.remove(), 1900);
+}
+
+// ---------- state ----------
+let state = {
+  tripId: new URLSearchParams(location.search).get('t'),
+  trip: null,
+  players: [],
+  games: [],   // each: {..., lines: [{player_id, contribution, payout}]}
+  tab: 'games',
+  loading: true,
+};
+
+// ---------- data ----------
+async function loadAll() {
+  const id = state.tripId;
+  if (!id) { state.loading = false; return render(); }
+  const [{ data: trip }, { data: players }, { data: games }] = await Promise.all([
+    db.from('trips').select('*').eq('id', id).maybeSingle(),
+    db.from('players').select('*').eq('trip_id', id).order('name'),
+    db.from('games').select('*, game_lines(*)').eq('trip_id', id).order('played_at', { ascending: false }),
+  ]);
+  state.trip = trip || null;
+  state.players = players || [];
+  state.games = (games || []).map((g) => ({ ...g, lines: g.game_lines || [] }));
+  state.loading = false;
+  render();
+}
+
+let refetchTimer = null;
+function scheduleRefetch() {
+  clearTimeout(refetchTimer);
+  refetchTimer = setTimeout(loadAll, 150);
+}
+
+function subscribeRealtime(id) {
+  db.channel('trip-' + id)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: 'trip_id=eq.' + id }, scheduleRefetch)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'games', filter: 'trip_id=eq.' + id }, scheduleRefetch)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'game_lines' }, scheduleRefetch)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: 'id=eq.' + id }, scheduleRefetch)
+    .subscribe();
+}
+
+// derive: flat lines with player names, for the engine
+function tripLines() {
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  const out = [];
+  for (const g of state.games)
+    for (const l of g.lines) {
+      const name = nameById[l.player_id];
+      if (name) out.push({ name, contribution: l.contribution, payout: l.payout });
+    }
+  return out;
+}
+function balances() { return netBalances(tripLines()); }
+
+// ---------- actions ----------
+async function createTrip(name, buyin) {
+  const { data, error } = await db
+    .from('trips').insert({ name, default_buyin: buyin }).select().single();
+  if (error) { toast('Could not create trip'); return; }
+  state.tripId = data.id;
+  history.replaceState(null, '', location.pathname + '?t=' + data.id);
+  await loadAll();
+  subscribeRealtime(data.id);
+}
+async function addPlayer(name) {
+  await db.from('players').insert({ trip_id: state.tripId, name });
+  scheduleRefetch(); // instant feedback for this client; realtime updates the others
+}
+async function removePlayer(id) {
+  await db.from('players').delete().eq('id', id);
+  scheduleRefetch();
+}
+async function saveGame({ id, name, buyin, played_at, lines }) {
+  if (id) {
+    await db.from('games').update({ name, buyin, played_at }).eq('id', id);
+    await db.from('game_lines').delete().eq('game_id', id);
+    await db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: id })));
+  } else {
+    const { data, error } = await db.from('games')
+      .insert({ trip_id: state.tripId, name, buyin, played_at }).select().single();
+    if (error) { toast('Could not save game'); return; }
+    await db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: data.id })));
+  }
+  scheduleRefetch();
+}
+async function deleteGame(id) {
+  await db.from('games').delete().eq('id', id);
+  scheduleRefetch();
+}
+
+// ---------- render ----------
+const root = () => document.getElementById('root');
+function render() {
+  const r = root();
+  r.innerHTML = '';
+  if (state.loading) { r.append(el('div', { class: 'empty', text: 'Loading…' })); return; }
+  if (!state.tripId || !state.trip) { r.append(renderLanding()); return; }
+  r.append(renderHeader(), renderTabs(), renderBody());
+  if (state.tab === 'games') r.append(renderFab());
+}
+
+function renderLanding() {
+  let name = '', buyin = 50;
+  const wrap = el('div', { class: 'wrap' });
+  const card = el('div', { class: 'card' });
+  card.append(el('div', { class: 'empty', html: '<div class="big">📒</div>' }));
+  card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 4px' }));
+  card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
+
+  const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', oninput: (e) => (name = e.target.value) });
+  card.append(el('label', { class: 'field', text: 'Trip name' }), nameInp);
+
+  const stepVal = el('span', { class: 'val', text: money(buyin) });
+  const setB = (v) => { buyin = Math.max(0, v); stepVal.textContent = money(buyin); };
+  card.append(el('label', { class: 'field', text: 'Default buy-in' }),
+    el('div', { class: 'stepper', style: 'margin-top:6px' }, [
+      el('button', { text: '−', onclick: () => setB(buyin - 5) }),
+      stepVal,
+      el('button', { text: '+', onclick: () => setB(buyin + 5) }),
+    ]));
+
+  const btn = el('button', { class: 'btn block', style: 'margin-top:18px', text: 'Create trip',
+    onclick: () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim(), buyin); } });
+  card.append(btn);
+  wrap.append(card);
+  return wrap;
+}
+
+function renderHeader() {
+  const header = el('header', { class: 'app' });
+  const shareUrl = location.origin + location.pathname + '?t=' + state.tripId;
+  header.append(el('div', { class: 'row' }, [
+    el('div', { class: 'grow', style: 'flex:1' }, [
+      el('h1', { text: state.trip.name }),
+      el('div', { class: 'sub', text: 'Code ' + (state.trip.code || '—') + ' · ' + state.players.length + ' players' }),
+    ]),
+    el('button', { class: 'btn small', text: 'Share', onclick: async () => {
+      try {
+        if (navigator.share) await navigator.share({ title: 'The Ledger — ' + state.trip.name, url: shareUrl });
+        else { await navigator.clipboard.writeText(shareUrl); toast('Link copied'); }
+      } catch (_) { try { await navigator.clipboard.writeText(shareUrl); toast('Link copied'); } catch (__) {} }
+    } }),
+  ]));
+  return header;
+}
+
+function renderTabs() {
+  const tabs = el('nav', { class: 'tabs' });
+  for (const [key, label] of [['players', 'Players'], ['games', 'Games'], ['tally', 'Tally'], ['settle', 'Settle Up']]) {
+    tabs.append(el('button', { class: state.tab === key ? 'active' : '', text: label,
+      onclick: () => { state.tab = key; render(); } }));
+  }
+  return tabs;
+}
+
+function renderBody() {
+  const wrap = el('div', { class: 'wrap' });
+  if (state.tab === 'players') wrap.append(renderPlayers());
+  else if (state.tab === 'games') wrap.append(renderGames());
+  else if (state.tab === 'tally') wrap.append(renderTally());
+  else if (state.tab === 'settle') wrap.append(renderSettle());
+  return wrap;
+}
+
+function renderPlayers() {
+  const box = el('div', {});
+  let name = '';
+  const inp = el('input', { class: 'inp', placeholder: 'Add a person…', oninput: (e) => (name = e.target.value) });
+  const add = () => { const n = name.trim(); if (!n) return; addPlayer(n); inp.value = ''; name = ''; inp.focus(); };
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') add(); });
+  box.append(el('div', { class: 'card' }, [
+    el('div', { class: 'inline' }, [
+      el('div', { class: 'grow', style: 'flex:1' }, [inp]),
+      el('button', { class: 'btn', text: 'Add', onclick: add }),
+    ]),
+  ]));
+  if (!state.players.length) box.append(el('div', { class: 'empty', text: 'Add everyone on the trip.' }));
+  for (const p of state.players) {
+    box.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow title', text: p.name }),
+      el('button', { class: 'iconbtn', html: '🗑', onclick: () => { if (confirm('Remove ' + p.name + '? This also removes them from all games.')) removePlayer(p.id); } }),
+    ]));
+  }
+  return box;
+}
+
+function renderGames() {
+  const box = el('div', {});
+  if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players first (Players tab).' })); return box; }
+  if (!state.games.length) box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games yet.<br>Tap ＋ to log the first one.' }));
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  for (const g of state.games) {
+    const pot = g.lines.reduce((s, l) => s + l.contribution, 0);
+    const paid = g.lines.reduce((s, l) => s + l.payout, 0);
+    const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
+      .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
+    const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
+    if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
+    if (pot !== paid) meta.push('⚠︎ unbalanced');
+    box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
+      el('div', { class: 'grow' }, [
+        el('div', { class: 'title', text: g.name }),
+        el('div', { class: 'muted', text: meta.join('  ·  ') }),
+      ]),
+      el('div', { class: 'money', text: money(pot) }),
+    ]));
+  }
+  return box;
+}
+
+function renderTally() {
+  const box = el('div', {});
+  if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players to see the tally.' })); return box; }
+  const b = balances();
+  const rows = state.players.map((p) => ({ name: p.name, net: b[p.name] ?? 0 }))
+    .sort((x, y) => (y.net - x.net) || (x.name < y.name ? -1 : 1));
+  for (const r of rows) {
+    const cls = r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : 'zero';
+    box.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow title', text: r.name }),
+      el('div', { class: cls, text: signed(r.net) }),
+    ]));
+  }
+  box.append(el('div', { class: 'muted', style: 'margin-top:12px;text-align:center', text: 'Positive = they are owed.  Negative = they owe.' }));
+  return box;
+}
+
+function renderSettle() {
+  const box = el('div', {});
+  if (!state.games.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
+  const b = balances();
+  const payments = minimize(b);
+  const res = residual(b);
+  if (!payments.length) {
+    box.append(el('div', { class: 'empty', html: '<div class="big">✅</div><b>All square</b><br>Everyone is even — no payments needed.' }));
+    return box;
+  }
+  if (res !== 0) {
+    box.append(el('div', { class: 'card', style: 'border-color:var(--accent)' }, [
+      el('div', { class: 'neg', text: '⚠︎ A game pot is unbalanced (off by ' + money(Math.abs(res)) + '). Fix it in Games for an exact settlement.' }),
+    ]));
+  }
+  box.append(el('div', { class: 'muted', style: 'margin-top:12px', text: payments.length + ' payment' + (payments.length === 1 ? '' : 's') + ' to settle everyone:' }));
+  for (const p of payments) {
+    box.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow', html: '<b>' + escapeHtml(p.from) + '</b> &rarr; <b>' + escapeHtml(p.to) + '</b>' }),
+      el('div', { class: 'money', text: money(p.amount) }),
+    ]));
+  }
+  return box;
+}
+function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function renderFab() {
+  return el('button', { class: 'fab', text: '＋', onclick: () => openGameModal(null) });
+}
+
+// ---------- game modal ----------
+function openGameModal(game) {
+  const editing = !!game;
+  let name = game ? game.name : '';
+  let buyin = game ? game.buyin : (state.trip.default_buyin || 0);
+  let when = game ? new Date(game.played_at) : new Date();
+  const selected = new Set(game ? game.lines.map((l) => l.player_id) : []);
+  let winnerId = null;
+  let manual = false;
+  const payouts = {}; // player_id -> payout (manual mode)
+  if (game) {
+    for (const l of game.lines) payouts[l.player_id] = l.payout;
+    const winners = game.lines.filter((l) => l.payout > 0);
+    winnerId = winners.length === 1 ? winners[0].player_id : null;
+    const cleanWTA = winners.length === 1 && game.lines.every((l) => l.contribution === game.buyin);
+    manual = !cleanWTA && game.lines.length > 0;
+  }
+
+  const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
+  const modal = el('div', { class: 'modal' });
+  bg.append(modal);
+  document.body.append(bg);
+
+  const selPlayers = () => state.players.filter((p) => selected.has(p.id));
+  const pot = () => buyin * selected.size;
+  const totalPayout = () => selPlayers().reduce((s, p) => s + (payouts[p.id] || 0), 0);
+
+  function seedManual() {
+    for (const p of selPlayers()) if (payouts[p.id] == null) payouts[p.id] = p.id === winnerId ? pot() : 0;
+  }
+  function rebuild() { modal.innerHTML = ''; build(); }
+
+  function build() {
+    // top bar
+    modal.append(el('div', { class: 'bar' }, [
+      el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
+      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit game' : 'New game' })]),
+      el('button', { class: 'btn small', text: 'Save', onclick: onSave }),
+    ]));
+
+    // fields
+    modal.append(el('label', { class: 'field', text: 'Game name' }),
+      el('input', { class: 'inp', value: name, placeholder: 'e.g. Yahtzee', oninput: (e) => (name = e.target.value) }));
+
+    const dt = el('input', { class: 'inp', type: 'datetime-local', value: toLocalInput(when),
+      oninput: (e) => { const d = new Date(e.target.value); if (!isNaN(d)) when = d; } });
+    modal.append(el('label', { class: 'field', text: 'Time' }), dt);
+
+    const bVal = el('span', { class: 'val', text: money(buyin) });
+    modal.append(el('label', { class: 'field', text: 'Buy-in' }),
+      el('div', { class: 'stepper', style: 'margin-top:6px' }, [
+        el('button', { text: '−', onclick: () => { buyin = Math.max(0, buyin - 5); bVal.textContent = money(buyin); updateTotals(); } }),
+        bVal,
+        el('button', { text: '+', onclick: () => { buyin += 5; bVal.textContent = money(buyin); updateTotals(); } }),
+      ]));
+
+    // participants
+    modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
+    for (const p of state.players) {
+      const sel = selected.has(p.id);
+      modal.append(el('div', { class: 'check' + (sel ? ' sel' : ''), onclick: () => {
+        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; if (winnerId === p.id) winnerId = null; }
+        else selected.add(p.id);
+        if (manual) seedManual();
+        rebuild();
+      } }, [ el('div', { class: 'box' }), el('div', { class: 'grow title', text: p.name }) ]));
+    }
+
+    if (selected.size >= 2) {
+      if (!manual) {
+        modal.append(el('div', { class: 'section-h', text: 'Winner (takes the whole pot)' }));
+        for (const p of selPlayers()) {
+          const isW = winnerId === p.id;
+          modal.append(el('div', { class: 'check' + (isW ? ' sel' : ''), onclick: () => { winnerId = p.id; rebuild(); } }, [
+            el('div', { class: 'grow' }, [ el('span', { class: isW ? 'crown' : '', text: (isW ? '👑 ' : '') + p.name }) ]),
+            isW ? el('div', { class: 'pos', text: signed(pot() - buyin) }) : el('span', { class: 'muted', text: '' }),
+          ]));
+        }
+      } else {
+        modal.append(el('div', { class: 'section-h', text: 'Payouts' }));
+        for (const p of selPlayers()) {
+          const inp = el('input', { class: 'inp payin', type: 'number', min: '0', step: '5', value: String(payouts[p.id] || 0),
+            oninput: (e) => { payouts[p.id] = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
+          modal.append(el('div', { class: 'check' }, [ el('div', { class: 'grow title', text: p.name }), inp ]));
+        }
+        modal.append(el('div', { class: 'balanceline', style: 'margin-top:10px' }, [balanceLabel()]));
+      }
+
+      const toggle = el('label', { class: 'check', style: 'margin-top:16px' }, [
+        el('div', { class: 'grow', text: 'Split the pot / edit amounts' }),
+        (() => { const c = el('input', { type: 'checkbox' }); c.checked = manual; c.addEventListener('change', () => { manual = c.checked; if (manual) seedManual(); rebuild(); }); return c; })(),
+      ]);
+      modal.append(toggle);
+    } else {
+      modal.append(el('div', { class: 'muted', style: 'margin-top:12px', text: 'Select at least 2 players.' }));
+    }
+
+    if (editing) {
+      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--accent)', text: 'Delete game',
+        onclick: () => { if (confirm('Delete this game?')) { deleteGame(game.id); bg.remove(); } } }));
+    }
+  }
+
+  function balanceLabel() {
+    const d = totalPayout() - pot();
+    return d === 0
+      ? el('span', { class: 'balance-ok', text: '✓ Pot balanced' })
+      : el('span', { class: 'balance-off', text: '⚠︎ Off by ' + money(Math.abs(d)) + (d > 0 ? ' over' : ' under') });
+  }
+  function updateTotals() {
+    const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
+    const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
+  }
+
+  function onSave() {
+    if (!name.trim()) { toast('Name the game'); return; }
+    if (selected.size < 2) { toast('Pick at least 2 players'); return; }
+    let lines;
+    if (manual) {
+      if (totalPayout() !== pot()) { toast('Payouts must equal the pot'); return; }
+      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: buyin, payout: payouts[p.id] || 0 }));
+    } else {
+      if (!winnerId) { toast('Pick a winner'); return; }
+      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: buyin, payout: p.id === winnerId ? pot() : 0 }));
+    }
+    saveGame({ id: game ? game.id : null, name: name.trim(), buyin, played_at: when.toISOString(), lines });
+    bg.remove();
+  }
+
+  build();
+}
+
+function toLocalInput(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+// ---------- boot ----------
+render();
+loadAll();
+if (state.tripId) subscribeRealtime(state.tripId);
+</script>
+</body>
+</html>
