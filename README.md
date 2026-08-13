@@ -15,9 +15,10 @@ Live app: enable GitHub Pages (see below) — it will be at
 
 ## How to use it
 
-1. Open the app. Create a trip (name + default buy-in).
+1. Open the app. Create a trip — just give it a name.
 2. **Players** tab — add everyone on the trip.
-3. **Games** tab — tap **＋** to log a game: name it, pick who played, tap the winner
+3. **Games** tab — tap **＋** to log a game: name it, set the buy-in for that game (it
+   defaults to the last game's, since money is per-game), pick who played, tap the winner
    (they take the whole pot). For a split pot, flip **"Split the pot / edit amounts"** and
    type each person's winnings — a live check makes sure the payouts add up to the pot.
 4. **Tally** tab — the running scoreboard (green = owed money, red = owes).

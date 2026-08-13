@@ -289,9 +289,9 @@ function tripLines() {
 function balances() { return netBalances(tripLines()); }
 
 // ---------- actions ----------
-async function createTrip(name, buyin) {
+async function createTrip(name) {
   const { data, error } = await db
-    .from('trips').insert({ name, default_buyin: buyin }).select().single();
+    .from('trips').insert({ name }).select().single();
   if (error) { toast('Could not create trip'); return; }
   state.tripId = data.id;
   history.replaceState(null, '', location.pathname + '?t=' + data.id);
@@ -336,28 +336,21 @@ function render() {
 }
 
 function renderLanding() {
-  let name = '', buyin = 50;
+  let name = '';
   const wrap = el('div', { class: 'wrap' });
   const card = el('div', { class: 'card' });
   card.append(el('div', { class: 'empty', html: '<div class="big">📒</div>' }));
   card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 4px' }));
   card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
 
-  const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', oninput: (e) => (name = e.target.value) });
+  const submit = () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim()); };
+  const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', autofocus: 'true', oninput: (e) => (name = e.target.value) });
+  nameInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   card.append(el('label', { class: 'field', text: 'Trip name' }), nameInp);
 
-  const stepVal = el('span', { class: 'val', text: money(buyin) });
-  const setB = (v) => { buyin = Math.max(0, v); stepVal.textContent = money(buyin); };
-  card.append(el('label', { class: 'field', text: 'Default buy-in' }),
-    el('div', { class: 'stepper', style: 'margin-top:6px' }, [
-      el('button', { text: '−', onclick: () => setB(buyin - 5) }),
-      stepVal,
-      el('button', { text: '+', onclick: () => setB(buyin + 5) }),
-    ]));
-
-  const btn = el('button', { class: 'btn block', style: 'margin-top:18px', text: 'Create trip',
-    onclick: () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim(), buyin); } });
+  const btn = el('button', { class: 'btn block', style: 'margin-top:18px', text: 'Create trip', onclick: submit });
   card.append(btn);
+  setTimeout(() => nameInp.focus(), 0);
   wrap.append(card);
   return wrap;
 }
@@ -495,7 +488,9 @@ function renderFab() {
 function openGameModal(game) {
   const editing = !!game;
   let name = game ? game.name : '';
-  let buyin = game ? game.buyin : (state.trip.default_buyin || 0);
+  // Default a new game's buy-in to the most recent game's (buy-ins are per-game and
+  // often repeat); still fully editable below.
+  let buyin = game ? game.buyin : (state.games.length ? state.games[0].buyin : 0);
   let when = game ? new Date(game.played_at) : new Date();
   const selected = new Set(game ? game.lines.map((l) => l.player_id) : []);
   let winnerId = null;
@@ -539,13 +534,10 @@ function openGameModal(game) {
       oninput: (e) => { const d = new Date(e.target.value); if (!isNaN(d)) when = d; } });
     modal.append(el('label', { class: 'field', text: 'Time' }), dt);
 
-    const bVal = el('span', { class: 'val', text: money(buyin) });
-    modal.append(el('label', { class: 'field', text: 'Buy-in' }),
-      el('div', { class: 'stepper', style: 'margin-top:6px' }, [
-        el('button', { text: '−', onclick: () => { buyin = Math.max(0, buyin - 5); bVal.textContent = money(buyin); updateTotals(); } }),
-        bVal,
-        el('button', { text: '+', onclick: () => { buyin += 5; bVal.textContent = money(buyin); updateTotals(); } }),
-      ]));
+    const buyInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric',
+      value: String(buyin), placeholder: 'Buy-in ($)',
+      oninput: (e) => { buyin = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
+    modal.append(el('label', { class: 'field', text: 'Buy-in (per player)' }), buyInp);
 
     // participants
     modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
