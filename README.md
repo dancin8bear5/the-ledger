@@ -32,7 +32,10 @@ Live app: enable GitHub Pages (see below) — it will be at
 6. **Share** button — copies the trip link. Send it to the group; everyone joins the same
    live trip.
 7. **History** (button on the home screen) — totals across every trip: money that changed
-   hands all-time, by year, by game, and by person.
+   hands all-time, **by trip** (tap to open it), by year, by game, and by person.
+
+On the winner screen, every player shows their **live net** (winner's gain, everyone
+else's loss) so you can see the outcome as you add rebuys, before saving.
 
 ## How it works
 

@@ -474,12 +474,13 @@ function renderLanding() {
 
 // ---------- history (across all trips) ----------
 async function loadHistory() {
-  const [g, l, p] = await Promise.all([
+  const [g, l, p, t] = await Promise.all([
     db.from('games').select('*'),
     db.from('game_lines').select('*'),
     db.from('players').select('*'),
+    db.from('trips').select('*'),
   ]);
-  state.historyRaw = { games: g.data || [], lines: l.data || [], players: p.data || [] };
+  state.historyRaw = { games: g.data || [], lines: l.data || [], players: p.data || [], trips: t.data || [] };
 }
 
 function renderHistory() {
@@ -496,15 +497,16 @@ function renderHistory() {
     return wrap;
   }
 
-  const { games, lines, players } = state.historyRaw;
+  const { games, lines, players, trips } = state.historyRaw;
   if (!games.length) { wrap.append(el('div', { class: 'empty', text: 'No games recorded yet.' })); return wrap; }
 
   const pname = Object.fromEntries(players.map((p) => [p.id, p.name]));
+  const tripById = Object.fromEntries((trips || []).map((t) => [t.id, t]));
   const linesByGame = {};
   for (const l of lines) (linesByGame[l.game_id] || (linesByGame[l.game_id] = [])).push(l);
 
   let total = 0;
-  const byYear = {}, byGame = {}, byPerson = {};
+  const byYear = {}, byGame = {}, byPerson = {}, byTrip = {};
   for (const g of games) {
     const ls = linesByGame[g.id] || [];
     let moved = 0;
@@ -518,12 +520,14 @@ function renderHistory() {
     const yr = new Date(g.played_at).getFullYear();
     byYear[yr] = (byYear[yr] || 0) + moved;
     byGame[g.name] = (byGame[g.name] || 0) + moved;
+    const bt = byTrip[g.trip_id] || (byTrip[g.trip_id] = { moved: 0, games: 0 });
+    bt.moved += moved; bt.games += 1;
   }
 
   wrap.append(el('div', { class: 'card', style: 'text-align:center' }, [
     el('div', { class: 'muted', text: 'Total money that changed hands (all time)' }),
     el('div', { class: 'money', style: 'font-size:30px;margin-top:4px', text: money(total) }),
-    el('div', { class: 'muted', style: 'margin-top:4px', text: games.length + ' games · ' + Object.keys(byYear).length + ' year(s)' }),
+    el('div', { class: 'muted', style: 'margin-top:4px', text: games.length + ' games · ' + Object.keys(byTrip).length + ' trip(s) · ' + Object.keys(byYear).length + ' year(s)' }),
   ]));
 
   const section = (title, rows) => {
@@ -536,6 +540,21 @@ function renderHistory() {
       ]));
     }
   };
+
+  // By trip — tap to open that trip.
+  wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'By trip' }));
+  Object.entries(byTrip)
+    .map(([tid, v]) => ({ tid, ...v, t: tripById[tid] }))
+    .sort((a, b) => b.moved - a.moved)
+    .forEach((r) => {
+      wrap.append(el('div', { class: 'row-item', style: 'cursor:pointer', onclick: () => openTrip(r.tid) }, [
+        el('div', { class: 'grow' }, [
+          el('div', { class: 'title', text: r.t ? r.t.name : 'Trip' }),
+          el('div', { class: 'muted', text: r.games + ' game' + (r.games === 1 ? '' : 's') + (r.t ? ' · ' + new Date(r.t.date || r.t.created_at).toLocaleDateString() : '') }),
+        ]),
+        el('div', { class: 'money', text: money(r.moved) }),
+      ]));
+    });
 
   section('By year', Object.entries(byYear).sort((a, b) => b[0] - a[0]).map(([y, v]) => [String(y), money(v)]));
   section('By game', Object.entries(byGame).sort((a, b) => b[1] - a[1]).map(([g, v]) => [g, money(v)]));
@@ -805,9 +824,16 @@ function openGameModal(game) {
         modal.append(el('div', { class: 'section-h', text: 'Winner — takes the whole pot' }));
         for (const p of selPlayers()) {
           const isW = winnerId === p.id;
+          let netEl;
+          if (winnerId) {
+            const net = isW ? pot() - contribOf(p.id) : -contribOf(p.id);
+            netEl = el('div', { class: net > 0 ? 'pos' : net < 0 ? 'neg' : 'zero', text: signed(net) });
+          } else {
+            netEl = el('div', { class: 'muted', text: 'in for ' + money(contribOf(p.id)) });
+          }
           modal.append(el('div', { class: 'check' + (isW ? ' sel' : ''), onclick: () => { winnerId = isW ? null : p.id; rebuild(); } }, [
             el('div', { class: 'grow' }, [ el('span', { class: isW ? 'crown' : '', text: (isW ? '👑 ' : '') + p.name }) ]),
-            isW ? el('div', { class: 'pos', text: signed(pot() - contribOf(p.id)) }) : el('span', { class: 'muted', text: '' }),
+            netEl,
           ]));
         }
         if (!winnerId) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: "No winner yet? Just tap Save — the game stays open and won't affect Settle Up until you set the result." }));
