@@ -277,15 +277,21 @@ function subscribeRealtime(id) {
     .subscribe();
 }
 
-// derive: flat lines with player names, for the engine
+// A game is "open" (in progress) until someone has been paid.
+const gamePaid = (g) => g.lines.reduce((s, l) => s + l.payout, 0);
+const gameOpen = (g) => gamePaid(g) === 0;
+
+// derive: flat lines with player names, for the engine (settled games only)
 function tripLines() {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const out = [];
-  for (const g of state.games)
+  for (const g of state.games) {
+    if (gameOpen(g)) continue; // in-progress games don't affect balances yet
     for (const l of g.lines) {
       const name = nameById[l.player_id];
       if (name) out.push({ name, contribution: l.contribution, payout: l.payout });
     }
+  }
   return out;
 }
 function balances() { return netBalances(tripLines()); }
@@ -553,8 +559,9 @@ function renderGames() {
     const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
       .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
     const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
-    if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
-    if (pot !== paid) meta.push('⚠︎ unbalanced');
+    if (paid === 0) meta.push('⏳ in progress');
+    else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
+    if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
     box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
       el('div', { class: 'grow' }, [
         el('div', { class: 'title', text: g.name }),
@@ -585,14 +592,20 @@ function renderTally() {
 
 function renderSettle() {
   const box = el('div', {});
+  const openCount = state.games.filter(gameOpen).length;
+  const noteOpen = () => { if (openCount) box.append(el('div', { class: 'card', style: 'border-color:var(--gold)' }, [
+    el('div', { class: 'muted', text: '⏳ ' + openCount + ' game' + (openCount === 1 ? '' : 's') + ' in progress — not counted until you set the winner.' }),
+  ])); };
   if (!state.games.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
   const b = balances();
   const payments = minimize(b);
   const res = residual(b);
   if (!payments.length) {
+    noteOpen();
     box.append(el('div', { class: 'empty', html: '<div class="big">✅</div><b>All square</b><br>Everyone is even — no payments needed.' }));
     return box;
   }
+  noteOpen();
   if (res !== 0) {
     box.append(el('div', { class: 'card', style: 'border-color:var(--accent)' }, [
       el('div', { class: 'neg', text: '⚠︎ A game pot is unbalanced (off by ' + money(Math.abs(res)) + '). Fix it in Games for an exact settlement.' }),
@@ -624,15 +637,15 @@ function openGameModal(game) {
   let buyin = game ? game.buyin : (state.games.length ? state.games[0].buyin : 0);
   let when = game ? new Date(game.played_at) : new Date();
   const selected = new Set(game ? game.lines.map((l) => l.player_id) : []);
+  const contribs = {}; // player_id -> total contribution (buy-in + rebuys)
+  const payouts = {};  // player_id -> payout
   let winnerId = null;
   let manual = false;
-  const payouts = {}; // player_id -> payout (manual mode)
   if (game) {
-    for (const l of game.lines) payouts[l.player_id] = l.payout;
+    for (const l of game.lines) { payouts[l.player_id] = l.payout; contribs[l.player_id] = l.contribution; }
     const winners = game.lines.filter((l) => l.payout > 0);
     winnerId = winners.length === 1 ? winners[0].player_id : null;
-    const cleanWTA = winners.length === 1 && game.lines.every((l) => l.contribution === game.buyin);
-    manual = !cleanWTA && game.lines.length > 0;
+    manual = winners.length > 1; // multiple winners => split view; else winner-takes-all view
   }
 
   const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
@@ -640,8 +653,9 @@ function openGameModal(game) {
   bg.append(modal);
   document.body.append(bg);
 
+  const contribOf = (id) => (contribs[id] != null ? contribs[id] : buyin);
   const selPlayers = () => state.players.filter((p) => selected.has(p.id));
-  const pot = () => buyin * selected.size;
+  const pot = () => selPlayers().reduce((s, p) => s + contribOf(p.id), 0);
   const totalPayout = () => selPlayers().reduce((s, p) => s + (payouts[p.id] || 0), 0);
 
   function seedManual() {
@@ -649,12 +663,14 @@ function openGameModal(game) {
   }
   function rebuild() { modal.innerHTML = ''; build(); }
 
+  const isInProgress = () => (manual ? totalPayout() === 0 : !winnerId);
+
   function build() {
     // top bar
     modal.append(el('div', { class: 'bar' }, [
       el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
       el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit game' : 'New game' })]),
-      el('button', { class: 'btn small', text: 'Save', onclick: onSave }),
+      el('button', { class: 'btn small', text: selected.size >= 2 && isInProgress() ? 'Save (open)' : 'Save', onclick: onSave }),
     ]));
 
     // fields — game name: dropdown of common games + a custom "Other…" option
@@ -684,16 +700,28 @@ function openGameModal(game) {
       oninput: (e) => { buyin = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
     modal.append(el('label', { class: 'field', text: 'Buy-in (per player)' }), buyInp);
 
-    // participants
+    // participants + per-player buy-in / rebuys
     modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
     for (const p of state.players) {
       const sel = selected.has(p.id);
-      modal.append(el('div', { class: 'check' + (sel ? ' sel' : ''), onclick: () => {
-        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; if (winnerId === p.id) winnerId = null; }
-        else selected.add(p.id);
+      const toggle = () => {
+        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; if (winnerId === p.id) winnerId = null; }
+        else { selected.add(p.id); contribs[p.id] = buyin; }
         if (manual) seedManual();
         rebuild();
-      } }, [ el('div', { class: 'box' }), el('div', { class: 'grow title', text: p.name }) ]));
+      };
+      const row = el('div', { class: 'check' + (sel ? ' sel' : '') }, [
+        el('div', { class: 'box', onclick: toggle }),
+        el('div', { class: 'grow title', text: p.name, style: 'cursor:pointer', onclick: toggle }),
+      ]);
+      if (sel) {
+        row.append(el('div', { class: 'stepper' }, [
+          el('button', { text: '−', title: 'Remove a buy-in', onclick: () => { contribs[p.id] = Math.max(0, contribOf(p.id) - (buyin || 1)); rebuild(); } }),
+          el('span', { class: 'val', text: money(contribOf(p.id)) }),
+          el('button', { text: '+', title: 'Rebuy (add a buy-in)', onclick: () => { contribs[p.id] = contribOf(p.id) + (buyin || 1); rebuild(); } }),
+        ]));
+      }
+      modal.append(row);
     }
     // Inline add-player (so you can build the roster right here if nobody's added yet)
     const addBuf = { v: '' };
@@ -718,14 +746,15 @@ function openGameModal(game) {
 
     if (selected.size >= 2) {
       if (!manual) {
-        modal.append(el('div', { class: 'section-h', text: 'Winner (takes the whole pot)' }));
+        modal.append(el('div', { class: 'section-h', text: 'Winner — takes the whole pot' }));
         for (const p of selPlayers()) {
           const isW = winnerId === p.id;
-          modal.append(el('div', { class: 'check' + (isW ? ' sel' : ''), onclick: () => { winnerId = p.id; rebuild(); } }, [
+          modal.append(el('div', { class: 'check' + (isW ? ' sel' : ''), onclick: () => { winnerId = isW ? null : p.id; rebuild(); } }, [
             el('div', { class: 'grow' }, [ el('span', { class: isW ? 'crown' : '', text: (isW ? '👑 ' : '') + p.name }) ]),
-            isW ? el('div', { class: 'pos', text: signed(pot() - buyin) }) : el('span', { class: 'muted', text: '' }),
+            isW ? el('div', { class: 'pos', text: signed(pot() - contribOf(p.id)) }) : el('span', { class: 'muted', text: '' }),
           ]));
         }
+        if (!winnerId) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: "No winner yet? Just tap Save — the game stays open and won't affect Settle Up until you set the result." }));
       } else {
         modal.append(el('div', { class: 'section-h', text: 'Payouts' }));
         for (const p of selPlayers()) {
@@ -767,11 +796,13 @@ function openGameModal(game) {
     if (selected.size < 2) { toast('Pick at least 2 players'); return; }
     let lines;
     if (manual) {
-      if (totalPayout() !== pot()) { toast('Payouts must equal the pot'); return; }
-      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: buyin, payout: payouts[p.id] || 0 }));
+      const tp = totalPayout();
+      if (tp > 0 && tp !== pot()) { toast('Payouts must equal the pot, or clear them to save in progress'); return; }
+      // tp === 0 => saved in progress; tp === pot => finalized split
+      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: payouts[p.id] || 0 }));
     } else {
-      if (!winnerId) { toast('Pick a winner'); return; }
-      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: buyin, payout: p.id === winnerId ? pot() : 0 }));
+      // Winner set => winner-takes-all; no winner => open game (no payouts yet)
+      lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: (winnerId && p.id === winnerId) ? pot() : 0 }));
     }
     saveGame({ id: game ? game.id : null, name: name.trim(), buyin, played_at: when.toISOString(), lines });
     bg.remove();

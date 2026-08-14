@@ -21,9 +21,12 @@ Live app: enable GitHub Pages (see below) — it will be at
 3. **Games** tab — tap **＋** to log a game: pick the game from the dropdown (or choose
    **Other…** to type a custom name — custom names are saved for next time), set the
    buy-in for that game (it defaults to the last game's, since money is per-game), pick who
-   played (or add someone on the spot), tap the winner (they take the whole pot). For a
-   split pot, flip **"Split the pot / edit amounts"** and type each person's winnings — a
-   live check makes sure the payouts add up to the pot.
+   played (or add someone on the spot). Each player has a **−/+ buy-in** control for
+   **rebuys** (e.g. someone busts and buys back in — tap **+** to add another buy-in; the
+   pot updates). Then tap the winner (takes the whole pot), or flip **"Split the pot / edit
+   amounts"** for multiple winners (a live check makes payouts equal the pot).
+   **Don't know the result yet?** Just **Save** — the game stays **in progress** and is
+   left out of Tally/Settle Up until you open it later and set the winner.
 4. **Tally** tab — the running scoreboard (green = owed money, red = owes).
 5. **Settle Up** tab — the final who-pays-whom list, minimized.
 6. **Share** button — copies the trip link. Send it to the group; everyone joins the same
