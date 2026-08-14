@@ -6,9 +6,11 @@ settling everything up at the end in the **fewest possible payments**. Navy and 
 everywhere — Bear Down.
 
 Trip names are **unique** (case-insensitive): creating "lake weekend" when "Lake Weekend"
-exists shows a *Trip already exists* error. To remove a trip from your device's list, open
-it and tap the red **✕** next to **Share**; the trip itself stays live for anyone with
-the link.
+exists shows a *Trip already exists* error.
+
+Inside a trip, the top bar holds **＋** (add a game) to the left of **Share**, and a red
+**✕ Delete Trip** button that permanently deletes the trip — games, tallies, everything,
+for everyone — after a confirmation.
 
 - **One shared link, live on every device.** Open the link on any phone or laptop and you
   see the same trip update in real time. Anyone can log a game.
