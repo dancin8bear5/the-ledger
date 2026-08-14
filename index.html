@@ -234,12 +234,16 @@ function toast(msg) {
   setTimeout(() => t.remove(), 1900);
 }
 
-// Common games for the New Game dropdown; "Other…" reveals a free-text field.
+// Built-in games for the New Game dropdown; "Other…" reveals a free-text field.
+// Custom names get saved (custom_games) and merged in via allGameNames().
 const PRESET_GAMES = [
-  'Poker', "Texas Hold'em", 'Blackjack', 'Yahtzee', 'Screw Your Neighbor',
-  'Left Right Center (LCR)', 'Euchre', 'Spades', 'Hearts', 'Cribbage',
-  'Golf', 'Bunco', 'Craps', 'Acey Deucey', 'Pitch',
+  '3s & 9s', '3-5-7', '5 Card Draw', '5 Card Stud', 'Hi-Low', 'Razz',
+  'Kings and Little Men', 'High Card', 'Low-Chi', "Hold 'Em",
+  'Yahtzee', 'Screw Your Neighbor',
 ];
+// Preset + saved custom games, de-duplicated (case-sensitive on stored form).
+const allGameNames = () => Array.from(new Set([...PRESET_GAMES, ...state.customGames]));
+const isKnownGame = (n) => PRESET_GAMES.includes(n) || state.customGames.includes(n);
 
 // Remember trips this browser has opened, so the home screen can list them.
 const TRIPS_KEY = 'ledger.trips';
@@ -259,7 +263,24 @@ let state = {
   games: [],   // each: {..., lines: [{player_id, contribution, payout}]}
   tab: 'games',
   loading: true,
+  customGames: [],       // saved custom game names (global)
+  homeView: 'home',      // 'home' | 'history' when no trip is open
+  historyRaw: null,      // { games, lines, players } across all trips
 };
+
+// Global custom game names (retained across trips/devices).
+async function loadCustomGames() {
+  try {
+    const { data } = await db.from('custom_games').select('name').order('name');
+    state.customGames = (data || []).map((r) => r.name);
+  } catch (_) { state.customGames = state.customGames || []; }
+}
+async function rememberGameName(name) {
+  const n = (name || '').trim();
+  if (!n || isKnownGame(n)) return;
+  try { await db.from('custom_games').insert({ name: n }); } catch (_) {}
+  if (!state.customGames.includes(n)) state.customGames.push(n);
+}
 
 // ---------- data ----------
 async function loadAll() {
@@ -326,10 +347,14 @@ function tripLines() {
 function balances() { return netBalances(tripLines()); }
 
 // ---------- actions ----------
-async function createTrip(name) {
+async function createTrip(name, people = []) {
   const { data, error } = await db
     .from('trips').insert({ name }).select().single();
   if (error) { toast('Could not create trip'); return; }
+  const names = people.map((s) => s.trim()).filter(Boolean);
+  if (names.length) {
+    await db.from('players').insert(names.map((nm) => ({ trip_id: data.id, name: nm })));
+  }
   state.tripId = data.id;
   history.replaceState(null, '', location.pathname + '?t=' + data.id);
   await loadAll();
@@ -361,6 +386,7 @@ async function saveGame({ id, name, buyin, played_at, lines }) {
     if (error) { toast('Could not save game'); return; }
     await db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: data.id })));
   }
+  await rememberGameName(name); // custom names are retained for future games/trips
   scheduleRefetch();
 }
 async function deleteGame(id) {
@@ -374,23 +400,45 @@ function render() {
   const r = root();
   r.innerHTML = '';
   if (state.loading) { r.append(el('div', { class: 'empty', text: 'Loading…' })); return; }
-  if (!state.tripId || !state.trip) { r.append(renderLanding()); return; }
+  if (!state.tripId || !state.trip) {
+    r.append(state.homeView === 'history' ? renderHistory() : renderLanding());
+    return;
+  }
   r.append(renderHeader(), renderTabs(), renderBody());
   if (state.tab === 'games') r.append(renderFab());
 }
 
 function renderLanding() {
   let name = '';
+  const people = [];
   const wrap = el('div', { class: 'wrap' });
   const card = el('div', { class: 'card' });
   card.append(el('div', { class: 'empty', html: '<div class="big">📒</div>' }));
   card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 4px' }));
   card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
 
-  const submit = () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim()); };
+  const submit = () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim(), people); };
   const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', autofocus: 'true', oninput: (e) => (name = e.target.value) });
   nameInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   card.append(el('label', { class: 'field', text: 'Trip name' }), nameInp);
+
+  // People on the trip — become this trip's player list.
+  card.append(el('label', { class: 'field', text: 'People on the trip' }));
+  const chips = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px' });
+  const drawChips = () => {
+    chips.innerHTML = '';
+    people.forEach((nm, i) => chips.append(el('span', { class: 'pill', style: 'cursor:pointer', text: nm + '  ✕',
+      title: 'Remove', onclick: () => { people.splice(i, 1); drawChips(); } })));
+  };
+  const buf = { v: '' };
+  const addPerson = () => { const nm = buf.v.trim(); if (!nm) return; if (!people.includes(nm)) people.push(nm); buf.v = ''; personInp.value = ''; drawChips(); personInp.focus(); };
+  const personInp = el('input', { class: 'inp', placeholder: 'Add a name…', oninput: (e) => (buf.v = e.target.value) });
+  personInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') addPerson(); });
+  card.append(el('div', { class: 'inline', style: 'margin-top:6px' }, [
+    el('div', { class: 'grow', style: 'flex:1' }, [personInp]),
+    el('button', { class: 'btn ghost small', text: 'Add', onclick: addPerson }),
+  ]), chips);
+  card.append(el('div', { class: 'muted', style: 'margin-top:6px', text: 'Optional now — you can add or remove people any time on the Players tab.' }));
 
   const btn = el('button', { class: 'btn block', style: 'margin-top:18px', text: 'Create trip', onclick: submit });
   card.append(btn);
@@ -411,6 +459,83 @@ function renderLanding() {
     }
     wrap.append(el('div', { class: 'muted', style: 'margin-top:8px;text-align:center', text: 'Removing only hides a trip from this device — it stays live for others with the link.' }));
   }
+
+  // History across all trips.
+  wrap.append(el('button', { class: 'btn ghost block', style: 'margin-top:22px', text: '📊  History (all trips)',
+    onclick: () => { state.homeView = 'history'; state.historyRaw = null; render(); } }));
+  return wrap;
+}
+
+// ---------- history (across all trips) ----------
+async function loadHistory() {
+  const [g, l, p] = await Promise.all([
+    db.from('games').select('*'),
+    db.from('game_lines').select('*'),
+    db.from('players').select('*'),
+  ]);
+  state.historyRaw = { games: g.data || [], lines: l.data || [], players: p.data || [] };
+}
+
+function renderHistory() {
+  const wrap = el('div', { class: 'wrap' });
+  wrap.append(el('div', { class: 'bar', style: 'margin:8px 0 4px' }, [
+    el('button', { class: 'btn ghost small', text: '← Back', onclick: () => { state.homeView = 'home'; render(); } }),
+    el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: 'History' })]),
+    el('span', { style: 'display:inline-block;width:60px' }),
+  ]));
+
+  if (!state.historyRaw) {
+    wrap.append(el('div', { class: 'empty', text: 'Loading…' }));
+    loadHistory().then(() => { if (state.homeView === 'history') render(); });
+    return wrap;
+  }
+
+  const { games, lines, players } = state.historyRaw;
+  if (!games.length) { wrap.append(el('div', { class: 'empty', text: 'No games recorded yet.' })); return wrap; }
+
+  const pname = Object.fromEntries(players.map((p) => [p.id, p.name]));
+  const linesByGame = {};
+  for (const l of lines) (linesByGame[l.game_id] || (linesByGame[l.game_id] = [])).push(l);
+
+  let total = 0;
+  const byYear = {}, byGame = {}, byPerson = {};
+  for (const g of games) {
+    const ls = linesByGame[g.id] || [];
+    let moved = 0;
+    for (const l of ls) {
+      const net = l.payout - l.contribution;
+      if (net > 0) moved += net;                 // money that changed hands this game
+      const nm = pname[l.player_id];
+      if (nm) byPerson[nm] = (byPerson[nm] || 0) + net;
+    }
+    total += moved;
+    const yr = new Date(g.played_at).getFullYear();
+    byYear[yr] = (byYear[yr] || 0) + moved;
+    byGame[g.name] = (byGame[g.name] || 0) + moved;
+  }
+
+  wrap.append(el('div', { class: 'card', style: 'text-align:center' }, [
+    el('div', { class: 'muted', text: 'Total money that changed hands (all time)' }),
+    el('div', { class: 'money', style: 'font-size:30px;margin-top:4px', text: money(total) }),
+    el('div', { class: 'muted', style: 'margin-top:4px', text: games.length + ' games · ' + Object.keys(byYear).length + ' year(s)' }),
+  ]));
+
+  const section = (title, rows) => {
+    wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: title }));
+    if (!rows.length) { wrap.append(el('div', { class: 'muted', text: 'None yet.' })); return; }
+    for (const [label, val, cls] of rows) {
+      wrap.append(el('div', { class: 'row-item' }, [
+        el('div', { class: 'grow title', text: label }),
+        el('div', { class: cls || 'money', text: val }),
+      ]));
+    }
+  };
+
+  section('By year', Object.entries(byYear).sort((a, b) => b[0] - a[0]).map(([y, v]) => [String(y), money(v)]));
+  section('By game', Object.entries(byGame).sort((a, b) => b[1] - a[1]).map(([g, v]) => [g, money(v)]));
+  section('By person (net won / lost, all time)',
+    Object.entries(byPerson).sort((a, b) => b[1] - a[1]).map(([nm, v]) => [nm, signed(v), v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero']));
+
   return wrap;
 }
 
@@ -549,7 +674,7 @@ function openGameModal(game) {
   const editing = !!game;
   let name = game ? game.name : '';
   // Dropdown selection: a preset name, '' (none yet), or '__other__' (custom text).
-  let nameChoice = game ? (PRESET_GAMES.includes(game.name) ? game.name : '__other__') : '';
+  let nameChoice = game ? (isKnownGame(game.name) ? game.name : '__other__') : '';
   // Default a new game's buy-in to the most recent game's (buy-ins are per-game and
   // often repeat); still fully editable below.
   let buyin = game ? game.buyin : (state.games.length ? state.games[0].buyin : 0);
@@ -591,17 +716,17 @@ function openGameModal(game) {
     // fields — game name: dropdown of common games + a custom "Other…" option
     const nameSel = el('select', { class: 'inp' });
     nameSel.append(el('option', { value: '', text: 'Select a game…' }));
-    for (const g of PRESET_GAMES) nameSel.append(el('option', { value: g, text: g }));
+    for (const g of allGameNames()) nameSel.append(el('option', { value: g, text: g }));
     nameSel.append(el('option', { value: '__other__', text: 'Other (type a name)…' }));
     nameSel.value = nameChoice;
     nameSel.addEventListener('change', (e) => {
       nameChoice = e.target.value;
-      name = nameChoice === '__other__' ? (PRESET_GAMES.includes(name) ? '' : name) : nameChoice;
+      name = nameChoice === '__other__' ? (isKnownGame(name) ? '' : name) : nameChoice;
       rebuild();
     });
     modal.append(el('label', { class: 'field', text: 'Game' }), nameSel);
     if (nameChoice === '__other__') {
-      const customInp = el('input', { class: 'inp', style: 'margin-top:8px', value: PRESET_GAMES.includes(name) ? '' : name,
+      const customInp = el('input', { class: 'inp', style: 'margin-top:8px', value: isKnownGame(name) ? '' : name,
         placeholder: 'Game name', oninput: (e) => (name = e.target.value) });
       modal.append(customInp);
     }
@@ -718,6 +843,7 @@ function toLocalInput(d) {
 
 // ---------- boot ----------
 render();
+loadCustomGames();
 loadAll();
 if (state.tripId) subscribeRealtime(state.tripId);
 </script>

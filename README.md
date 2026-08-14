@@ -15,16 +15,21 @@ Live app: enable GitHub Pages (see below) — it will be at
 
 ## How to use it
 
-1. Open the app. Create a trip — just give it a name.
-2. **Players** tab — add everyone on the trip.
-3. **Games** tab — tap **＋** to log a game: name it, set the buy-in for that game (it
-   defaults to the last game's, since money is per-game), pick who played, tap the winner
-   (they take the whole pot). For a split pot, flip **"Split the pot / edit amounts"** and
-   type each person's winnings — a live check makes sure the payouts add up to the pot.
+1. Open the app. Create a trip — give it a name and (optionally) add the people on it.
+   Your past trips are listed on the home screen to reopen with one tap.
+2. **Players** tab — add or remove people any time.
+3. **Games** tab — tap **＋** to log a game: pick the game from the dropdown (or choose
+   **Other…** to type a custom name — custom names are saved for next time), set the
+   buy-in for that game (it defaults to the last game's, since money is per-game), pick who
+   played (or add someone on the spot), tap the winner (they take the whole pot). For a
+   split pot, flip **"Split the pot / edit amounts"** and type each person's winnings — a
+   live check makes sure the payouts add up to the pot.
 4. **Tally** tab — the running scoreboard (green = owed money, red = owes).
 5. **Settle Up** tab — the final who-pays-whom list, minimized.
 6. **Share** button — copies the trip link. Send it to the group; everyone joins the same
    live trip.
+7. **History** (button on the home screen) — totals across every trip: money that changed
+   hands all-time, by year, by game, and by person.
 
 ## How it works
 
