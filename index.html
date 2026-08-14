@@ -770,10 +770,19 @@ function openGameModal(game) {
       oninput: (e) => { const d = new Date(e.target.value); if (!isNaN(d)) when = d; } });
     modal.append(el('label', { class: 'field', text: 'Time' }), dt);
 
-    const buyInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric',
-      value: String(buyin), placeholder: 'Buy-in ($)',
+    // Buy-in changes never rebuild the modal (a rebuild mid-blur swallows the next
+    // tap) — updateTotals() refreshes every affected label in place instead.
+    const buyInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric', style: 'text-align:center',
+      value: String(buyin), placeholder: '$',
       oninput: (e) => { buyin = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
-    modal.append(el('label', { class: 'field', text: 'Buy-in (per player)' }), buyInp);
+    const applyBuy = (v) => { buyin = Math.max(0, Math.round(v || 0)); buyInp.value = String(buyin); updateTotals(); };
+    modal.append(el('label', { class: 'field', text: 'Buy-in (per player)' }),
+      el('div', { class: 'inline', style: 'margin-top:6px' }, [
+        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '−$5', onclick: () => applyBuy(buyin - 5) }),
+        el('div', { class: 'grow', style: 'flex:1' }, [buyInp]),
+        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '+$5', onclick: () => applyBuy(buyin + 5) }),
+      ]),
+      el('div', { class: 'muted', style: 'margin-top:4px', text: 'Buttons ±$5 · arrows ±$1 · or type an exact amount' }));
 
     // participants + per-player buy-in / rebuys
     modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
@@ -781,7 +790,7 @@ function openGameModal(game) {
       const sel = selected.has(p.id);
       const toggle = () => {
         if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; if (winnerId === p.id) winnerId = null; }
-        else { selected.add(p.id); contribs[p.id] = buyin; }
+        else { selected.add(p.id); } // contribution follows the buy-in until a rebuy sets an explicit amount
         if (manual) seedManual();
         rebuild();
       };
@@ -792,7 +801,7 @@ function openGameModal(game) {
       if (sel) {
         row.append(el('div', { class: 'stepper' }, [
           el('button', { text: '−', title: 'Remove a buy-in', onclick: () => { contribs[p.id] = Math.max(0, contribOf(p.id) - (buyin || 1)); rebuild(); } }),
-          el('span', { class: 'val', text: money(contribOf(p.id)) }),
+          el('span', { class: 'val', 'data-cpid': p.id, text: money(contribOf(p.id)) }),
           el('button', { text: '+', title: 'Rebuy (add a buy-in)', onclick: () => { contribs[p.id] = contribOf(p.id) + (buyin || 1); rebuild(); } }),
         ]));
       }
@@ -827,9 +836,9 @@ function openGameModal(game) {
           let netEl;
           if (winnerId) {
             const net = isW ? pot() - contribOf(p.id) : -contribOf(p.id);
-            netEl = el('div', { class: net > 0 ? 'pos' : net < 0 ? 'neg' : 'zero', text: signed(net) });
+            netEl = el('div', { class: net > 0 ? 'pos' : net < 0 ? 'neg' : 'zero', 'data-npid': p.id, text: signed(net) });
           } else {
-            netEl = el('div', { class: 'muted', text: 'in for ' + money(contribOf(p.id)) });
+            netEl = el('div', { class: 'muted', 'data-npid': p.id, text: 'in for ' + money(contribOf(p.id)) });
           }
           modal.append(el('div', { class: 'check' + (isW ? ' sel' : ''), onclick: () => { winnerId = isW ? null : p.id; rebuild(); } }, [
             el('div', { class: 'grow' }, [ el('span', { class: isW ? 'crown' : '', text: (isW ? '👑 ' : '') + p.name }) ]),
@@ -871,6 +880,20 @@ function openGameModal(game) {
   function updateTotals() {
     const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
     const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
+    // Per-player contribution labels (players without a rebuy follow the buy-in live)
+    modal.querySelectorAll('[data-cpid]').forEach((n) => { n.textContent = money(contribOf(n.dataset.cpid)); });
+    // Winner-screen net / "in for" labels
+    modal.querySelectorAll('[data-npid]').forEach((n) => {
+      const pid = n.dataset.npid;
+      if (winnerId) {
+        const net = pid === winnerId ? pot() - contribOf(pid) : -contribOf(pid);
+        n.className = net > 0 ? 'pos' : net < 0 ? 'neg' : 'zero';
+        n.textContent = signed(net);
+      } else {
+        n.className = 'muted';
+        n.textContent = 'in for ' + money(contribOf(pid));
+      }
+    });
   }
 
   function onSave() {
