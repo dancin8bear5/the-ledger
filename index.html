@@ -3,13 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#0A0D1A" />
+<meta name="theme-color" content="#0B162A" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230B162A'/><text x='50' y='72' font-size='60' text-anchor='middle'>🐻</text></svg>" />
 <title>The Ledger</title>
 <style>
+  /* Chicago Bears palette: navy #0B162A, orange #C83803, white */
   :root {
-    --bg: #0A0D1A; --surface: #141827; --elevated: #1E2235;
-    --accent: #E63946; --gold: #F4A261; --pos: #2A9D8F;
-    --text: #FFFFFF; --subtext: #9EA8B8; --border: #262c40;
+    --bg: #0B162A; --surface: #152238; --elevated: #1F2F4E;
+    --accent: #C83803; --gold: #FF8A3D; --pos: #2FBF8F;
+    --text: #FFFFFF; --subtext: #94A3BD; --border: #26385C;
+    --neg: #E85D5D;
     --radius: 14px;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -26,7 +29,7 @@
   /* Header */
   header.app {
     position: sticky; top: 0; z-index: 20; background: var(--bg);
-    padding: 14px 16px 10px; border-bottom: 1px solid var(--border);
+    padding: 14px 16px 10px; border-bottom: 3px solid var(--accent);
   }
   header.app .row { display: flex; align-items: center; gap: 10px; max-width: 720px; margin: 0 auto; }
   header.app h1 { font-size: 20px; margin: 0; flex: 1; font-weight: 700; letter-spacing: .2px; }
@@ -68,7 +71,7 @@
   .muted { color: var(--subtext); font-size: 13px; }
   .money { color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
   .pos { color: var(--pos); font-weight: 700; font-variant-numeric: tabular-nums; }
-  .neg { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .neg { color: var(--neg); font-weight: 700; font-variant-numeric: tabular-nums; }
   .zero { color: var(--subtext); font-weight: 700; font-variant-numeric: tabular-nums; }
   .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { text-align: center; color: var(--subtext); padding: 40px 20px; }
@@ -354,6 +357,12 @@ function balances() { return netBalances(tripLines()); }
 
 // ---------- actions ----------
 async function createTrip(name, people = []) {
+  // Trip names are unique, ignoring case ("Lake Weekend" == "lake weekend").
+  const { data: existing } = await db.from('trips').select('name');
+  if ((existing || []).some((t) => (t.name || '').trim().toLowerCase() === name.toLowerCase())) {
+    toast('Trip "' + name + '" already exists');
+    return;
+  }
   const { data, error } = await db
     .from('trips').insert({ name }).select().single();
   if (error) { toast('Could not create trip'); return; }
@@ -418,9 +427,10 @@ function renderLanding() {
   let name = '';
   const people = [];
   const wrap = el('div', { class: 'wrap' });
-  const card = el('div', { class: 'card' });
-  card.append(el('div', { class: 'empty', html: '<div class="big">📒</div>' }));
-  card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 4px' }));
+  const card = el('div', { class: 'card', style: 'border-top:4px solid var(--accent)' });
+  card.append(el('div', { class: 'empty', style: 'padding:24px 20px 8px', html: '<div class="big">🐻🏈</div>' }));
+  card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 2px;letter-spacing:1px;text-transform:uppercase' }));
+  card.append(el('p', { style: 'text-align:center;margin:0 0 4px;color:var(--accent);font-weight:800;letter-spacing:2px;text-transform:uppercase;font-size:12px', text: 'Bear Down' }));
   card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
 
   const submit = () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim(), people); };
@@ -459,11 +469,9 @@ function renderLanding() {
       wrap.append(el('div', { class: 'row-item' }, [
         el('div', { class: 'grow title', text: t.name, style: 'cursor:pointer', onclick: () => openTrip(t.id) }),
         el('button', { class: 'btn small', text: 'Open', onclick: () => openTrip(t.id) }),
-        el('button', { class: 'iconbtn', html: '✕', title: 'Remove from this list',
-          onclick: () => { forgetTrip(t.id); render(); } }),
       ]));
     }
-    wrap.append(el('div', { class: 'muted', style: 'margin-top:8px;text-align:center', text: 'Removing only hides a trip from this device — it stays live for others with the link.' }));
+    wrap.append(el('div', { class: 'muted', style: 'margin-top:8px;text-align:center', text: 'To remove a trip from this list, open it and tap the ✕ in the top bar.' }));
   }
 
   // History across all trips.
@@ -570,7 +578,7 @@ function renderHeader() {
   header.append(el('div', { class: 'row' }, [
     el('button', { class: 'iconbtn', html: '☰', title: 'Your trips', style: 'font-size:20px', onclick: goHome }),
     el('div', { class: 'grow', style: 'flex:1' }, [
-      el('h1', { text: state.trip.name }),
+      el('h1', { text: '🐻 ' + state.trip.name }),
       el('div', { class: 'sub', text: 'Code ' + (state.trip.code || '—') + ' · ' + state.players.length + ' players' }),
     ]),
     el('button', { class: 'btn small', text: 'Share', onclick: async () => {
@@ -579,6 +587,14 @@ function renderHeader() {
         else { await navigator.clipboard.writeText(shareUrl); toast('Link copied'); }
       } catch (_) { try { await navigator.clipboard.writeText(shareUrl); toast('Link copied'); } catch (__) {} }
     } }),
+    el('button', { class: 'iconbtn', html: '✕', title: 'Remove this trip from my list',
+      style: 'color:var(--neg);font-size:18px;font-weight:700',
+      onclick: () => {
+        if (confirm('Remove "' + state.trip.name + '" from your list on this device? The trip stays live for anyone with the link.')) {
+          forgetTrip(state.tripId);
+          goHome();
+        }
+      } }),
   ]));
   return header;
 }
@@ -868,7 +884,7 @@ function openGameModal(game) {
     }
 
     if (editing) {
-      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--accent)', text: 'Delete game',
+      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--neg)', text: 'Delete game',
         onclick: () => { if (confirm('Delete this game?')) { deleteGame(game.id); bg.remove(); } } }));
     }
   }

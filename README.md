@@ -1,8 +1,14 @@
-# The Ledger
+# The Ledger 🐻🏈
 
-A dead-simple web app for tracking money won and lost across many games on a group trip
-(Yahtzee, poker, "screw your neighbor," whatever), then settling everything up at the end
-in the **fewest possible payments**.
+A dead-simple, **Chicago Bears–themed** web app for tracking money won and lost across
+many games on a group trip (Yahtzee, poker, "screw your neighbor," whatever), then
+settling everything up at the end in the **fewest possible payments**. Navy and orange
+everywhere — Bear Down.
+
+Trip names are **unique** (case-insensitive): creating "lake weekend" when "Lake Weekend"
+exists shows a *Trip already exists* error. To remove a trip from your device's list, open
+it and tap the red **✕** next to **Share**; the trip itself stays live for anyone with
+the link.
 
 - **One shared link, live on every device.** Open the link on any phone or laptop and you
   see the same trip update in real time. Anyone can log a game.
