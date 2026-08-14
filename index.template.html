@@ -651,9 +651,9 @@ function openGameModal(game) {
   let name = game ? game.name : '';
   // Dropdown selection: a preset name, '' (none yet), or '__other__' (custom text).
   let nameChoice = game ? (isKnownGame(game.name) ? game.name : '__other__') : '';
-  // Default a new game's buy-in to the most recent game's (buy-ins are per-game and
-  // often repeat); still fully editable below.
-  let buyin = game ? game.buyin : (state.games.length ? state.games[0].buyin : 0);
+  // Default stake for newly selected players: last edited amount in this game,
+  // seeded from the most recent game's buy-in (buy-ins often repeat).
+  let stake = game ? game.buyin : (state.games.length ? state.games[0].buyin : 0);
   let when = game ? new Date(game.played_at) : new Date();
   const selected = new Set(game ? game.lines.map((l) => l.player_id) : []);
   const contribs = {}; // player_id -> total contribution (buy-in + rebuys)
@@ -672,7 +672,18 @@ function openGameModal(game) {
   bg.append(modal);
   document.body.append(bg);
 
-  const contribOf = (id) => (contribs[id] != null ? contribs[id] : buyin);
+  const contribOf = (id) => (contribs[id] != null ? contribs[id] : stake);
+  // Set a player's buy-in; the last edited amount becomes the default for newly
+  // selected players. syncInput refreshes the row's field (for −/+ button edits).
+  function setAmt(pid, v, syncInput) {
+    contribs[pid] = Math.max(0, Math.round(v || 0));
+    stake = contribs[pid];
+    if (syncInput) {
+      const inp = modal.querySelector('input.buyamt[data-pid="' + pid + '"]');
+      if (inp) inp.value = String(contribs[pid]);
+    }
+    updateTotals();
+  }
   const selPlayers = () => state.players.filter((p) => selected.has(p.id));
   const pot = () => selPlayers().reduce((s, p) => s + contribOf(p.id), 0);
   const totalPayout = () => selPlayers().reduce((s, p) => s + (payouts[p.id] || 0), 0);
@@ -714,27 +725,13 @@ function openGameModal(game) {
       oninput: (e) => { const d = new Date(e.target.value); if (!isNaN(d)) when = d; } });
     modal.append(el('label', { class: 'field', text: 'Time' }), dt);
 
-    // Buy-in changes never rebuild the modal (a rebuild mid-blur swallows the next
-    // tap) — updateTotals() refreshes every affected label in place instead.
-    const buyInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric', style: 'text-align:center',
-      value: String(buyin), placeholder: '$',
-      oninput: (e) => { buyin = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
-    const applyBuy = (v) => { buyin = Math.max(0, Math.round(v || 0)); buyInp.value = String(buyin); updateTotals(); };
-    modal.append(el('label', { class: 'field', text: 'Buy-in (per player)' }),
-      el('div', { class: 'inline', style: 'margin-top:6px' }, [
-        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '−$5', onclick: () => applyBuy(buyin - 5) }),
-        el('div', { class: 'grow', style: 'flex:1' }, [buyInp]),
-        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '+$5', onclick: () => applyBuy(buyin + 5) }),
-      ]),
-      el('div', { class: 'muted', style: 'margin-top:4px', text: 'Buttons ±$5 · arrows ±$1 · or type an exact amount' }));
-
-    // participants + per-player buy-in / rebuys
+    // participants — each selected player carries their own buy-in amount
     modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
     for (const p of state.players) {
       const sel = selected.has(p.id);
       const toggle = () => {
         if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; if (winnerId === p.id) winnerId = null; }
-        else { selected.add(p.id); } // contribution follows the buy-in until a rebuy sets an explicit amount
+        else { selected.add(p.id); contribs[p.id] = stake; } // new players start at the last-used amount
         if (manual) seedManual();
         rebuild();
       };
@@ -743,14 +740,19 @@ function openGameModal(game) {
         el('div', { class: 'grow title', text: p.name, style: 'cursor:pointer', onclick: toggle }),
       ]);
       if (sel) {
+        const amtInp = el('input', { class: 'inp buyamt', type: 'number', min: '0', step: '1', inputmode: 'numeric',
+          'data-pid': p.id, style: 'width:76px;text-align:center;margin-top:0;padding:8px 4px',
+          value: String(contribOf(p.id)),
+          oninput: (e) => setAmt(p.id, parseInt(e.target.value || '0', 10), false) });
         row.append(el('div', { class: 'stepper' }, [
-          el('button', { text: '−', title: 'Remove a buy-in', onclick: () => { contribs[p.id] = Math.max(0, contribOf(p.id) - (buyin || 1)); rebuild(); } }),
-          el('span', { class: 'val', 'data-cpid': p.id, text: money(contribOf(p.id)) }),
-          el('button', { text: '+', title: 'Rebuy (add a buy-in)', onclick: () => { contribs[p.id] = contribOf(p.id) + (buyin || 1); rebuild(); } }),
+          el('button', { text: '−', title: '-$5', onclick: () => setAmt(p.id, contribOf(p.id) - 5, true) }),
+          amtInp,
+          el('button', { text: '+', title: '+$5', onclick: () => setAmt(p.id, contribOf(p.id) + 5, true) }),
         ]));
       }
       modal.append(row);
     }
+    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: '−/+ move $5 · field arrows $1 · or type an exact amount. Rebuy = raise that player\'s total.' }));
     // Inline add-player (so you can build the roster right here if nobody's added yet)
     const addBuf = { v: '' };
     const doAddPlayer = async () => {
@@ -824,9 +826,7 @@ function openGameModal(game) {
   function updateTotals() {
     const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
     const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
-    // Per-player contribution labels (players without a rebuy follow the buy-in live)
-    modal.querySelectorAll('[data-cpid]').forEach((n) => { n.textContent = money(contribOf(n.dataset.cpid)); });
-    // Winner-screen net / "in for" labels
+    // Winner-screen net / "in for" labels (buy-in amounts are inputs and manage themselves)
     modal.querySelectorAll('[data-npid]').forEach((n) => {
       const pid = n.dataset.npid;
       if (winnerId) {
@@ -853,7 +853,7 @@ function openGameModal(game) {
       // Winner set => winner-takes-all; no winner => open game (no payouts yet)
       lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: (winnerId && p.id === winnerId) ? pot() : 0 }));
     }
-    saveGame({ id: game ? game.id : null, name: name.trim(), buyin, played_at: when.toISOString(), lines });
+    saveGame({ id: game ? game.id : null, name: name.trim(), buyin: stake, played_at: when.toISOString(), lines });
     bg.remove();
   }
 

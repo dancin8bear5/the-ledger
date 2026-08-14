@@ -19,14 +19,16 @@ Live app: enable GitHub Pages (see below) — it will be at
    Your past trips are listed on the home screen to reopen with one tap.
 2. **Players** tab — add or remove people any time.
 3. **Games** tab — tap **＋** to log a game: pick the game from the dropdown (or choose
-   **Other…** to type a custom name — custom names are saved for next time), set the
-   buy-in for that game (it defaults to the last game's, since money is per-game), pick who
-   played (or add someone on the spot). Each player has a **−/+ buy-in** control for
-   **rebuys** (e.g. someone busts and buys back in — tap **+** to add another buy-in; the
-   pot updates). Then tap the winner (takes the whole pot), or flip **"Split the pot / edit
-   amounts"** for multiple winners (a live check makes payouts equal the pot).
-   **Don't know the result yet?** Just **Save** — the game stays **in progress** and is
-   left out of Tally/Settle Up until you open it later and set the winner.
+   **Other…** to type a custom name — custom names are saved for next time), then pick who
+   played (or add someone on the spot). **Each player's row carries their buy-in**: the
+   **−/+ buttons move $5**, the field's arrows move $1, or type any exact amount. Newly
+   selected players default to the last-used amount, so one edit usually covers everyone.
+   A **rebuy** is just raising that player's total (busted at $50, bought back in → set
+   them to $100); the pot updates live. Then tap the winner (takes the whole pot), or flip
+   **"Split the pot / edit amounts"** for multiple winners (a live check makes payouts
+   equal the pot). **Don't know the result yet?** Just **Save** — the game stays
+   **in progress** and is left out of Tally/Settle Up until you open it later and set the
+   winner.
 4. **Tally** tab — the running scoreboard (green = owed money, red = owes).
 5. **Settle Up** tab — the final who-pays-whom list, minimized.
 6. **Share** button — copies the trip link. Send it to the group; everyone joins the same
