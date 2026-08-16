@@ -105,11 +105,12 @@
   .check .grow { flex: 1; }
   .payin { width: 96px; }
 
-  /* Money sliders: drag fast for $5 steps, slow for $1 */
+  /* Money sliders: drag fast for $5 steps, slow for $1. The JS paints the filled
+     portion orange via an inline gradient; this is the fallback track color. */
   input[type="range"].moneyrange {
     -webkit-appearance: none; appearance: none; flex-basis: 100%; width: 100%;
-    height: 6px; border-radius: 3px; background: var(--elevated); outline: none;
-    margin: 10px 0 2px;
+    height: 8px; border-radius: 4px; background: #3A4E78; outline: none;
+    border: 1px solid var(--border); margin: 10px 0 2px;
   }
   input[type="range"].moneyrange::-webkit-slider-thumb {
     -webkit-appearance: none; appearance: none; width: 26px; height: 26px;
@@ -201,6 +202,12 @@ function moneyControl(initial, onSet, cls, pid) {
     'data-pid': pid || null, value: String(value),
     style: 'width:84px;flex:none;text-align:center;margin-top:0;padding:8px 4px' });
   const range = el('input', { type: 'range', class: 'moneyrange', min: '0', max: String(maxFor(value)), step: '1', value: String(value) });
+  // Paint the filled portion of the track orange so the line is clearly visible.
+  const paint = () => {
+    const max = parseInt(range.max, 10) || 1;
+    const pct = Math.min(100, (value / max) * 100);
+    range.style.background = 'linear-gradient(to right, var(--accent) ' + pct + '%, #3A4E78 ' + pct + '%)';
+  };
   let last = value;
   range.addEventListener('input', () => {
     const raw = parseInt(range.value, 10) || 0;
@@ -209,6 +216,7 @@ function moneyControl(initial, onSet, cls, pid) {
     value = delta <= 1 ? raw : Math.round(raw / 5) * 5; // slow = $1, fast = snap to $5
     range.value = String(value);
     num.value = String(value);
+    paint();
     onSet(value);
   });
   num.addEventListener('input', () => {
@@ -216,8 +224,10 @@ function moneyControl(initial, onSet, cls, pid) {
     if (value > parseInt(range.max, 10)) range.max = String(maxFor(value));
     range.value = String(value);
     last = value;
+    paint();
     onSet(value);
   });
+  paint();
   return { num, range };
 }
 
