@@ -105,6 +105,22 @@
   .check .grow { flex: 1; }
   .payin { width: 96px; }
 
+  /* Money sliders: drag fast for $5 steps, slow for $1 */
+  input[type="range"].moneyrange {
+    -webkit-appearance: none; appearance: none; flex-basis: 100%; width: 100%;
+    height: 6px; border-radius: 3px; background: var(--elevated); outline: none;
+    margin: 10px 0 2px;
+  }
+  input[type="range"].moneyrange::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 26px; height: 26px;
+    border-radius: 50%; background: var(--accent); border: 2px solid rgba(255,255,255,.25);
+    cursor: pointer;
+  }
+  input[type="range"].moneyrange::-moz-range-thumb {
+    width: 26px; height: 26px; border-radius: 50%; background: var(--accent);
+    border: 2px solid rgba(255,255,255,.25); cursor: pointer;
+  }
+
   /* Modal */
   .modal-bg {
     position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40;
@@ -172,6 +188,37 @@ function toast(msg) {
   const t = el('div', { class: 'toast', text: msg });
   document.body.append(t);
   setTimeout(() => t.remove(), 1900);
+}
+
+// Dollar-amount control: a typed number field plus a slider. Dragging the slider
+// at normal speed snaps to $5 steps; dragging very slowly (or arrow keys) moves
+// $1 at a time. Typing an exact amount always works and extends the slider range.
+// Returns { num, range } elements to place in a flex row (range wraps full-width).
+function moneyControl(initial, onSet, cls, pid) {
+  let value = Math.max(0, Math.round(initial || 0));
+  const maxFor = (v) => Math.max(200, Math.ceil((v + 50) / 100) * 100);
+  const num = el('input', { class: 'inp ' + (cls || ''), type: 'number', min: '0', step: '1', inputmode: 'numeric',
+    'data-pid': pid || null, value: String(value),
+    style: 'width:84px;flex:none;text-align:center;margin-top:0;padding:8px 4px' });
+  const range = el('input', { type: 'range', class: 'moneyrange', min: '0', max: String(maxFor(value)), step: '1', value: String(value) });
+  let last = value;
+  range.addEventListener('input', () => {
+    const raw = parseInt(range.value, 10) || 0;
+    const delta = Math.abs(raw - last);
+    last = raw;
+    value = delta <= 1 ? raw : Math.round(raw / 5) * 5; // slow = $1, fast = snap to $5
+    range.value = String(value);
+    num.value = String(value);
+    onSet(value);
+  });
+  num.addEventListener('input', () => {
+    value = Math.max(0, parseInt(num.value || '0', 10));
+    if (value > parseInt(range.max, 10)) range.max = String(maxFor(value));
+    range.value = String(value);
+    last = value;
+    onSet(value);
+  });
+  return { num, range };
 }
 
 // Built-in games for the New Game dropdown; "Other…" reveals a free-text field.
@@ -971,7 +1018,11 @@ function openAdjModal(adj) {
     }
   }
 
-  const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
+  const isDirty = () => amount > 0 || !!payerId || !!note.trim();
+  const bg = el('div', { class: 'modal-bg', onclick: (e) => {
+    if (e.target !== bg) return;
+    if (!isDirty() || confirm('Discard this entry? Your input will be lost.')) bg.remove();
+  } });
   const modal = el('div', { class: 'modal' });
   bg.append(modal);
   document.body.append(bg);
@@ -1004,13 +1055,12 @@ function openAdjModal(adj) {
     }
     modal.append(seg);
 
-    const amtInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric', style: 'text-align:center',
-      value: String(amount), oninput: (e) => (amount = Math.max(0, parseInt(e.target.value || '0', 10))) });
+    const ctl = moneyControl(amount, (v) => (amount = v));
     modal.append(el('label', { class: 'field', text: 'Amount' }),
-      el('div', { class: 'inline', style: 'margin-top:6px' }, [
-        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '−$5', onclick: () => { amount = Math.max(0, amount - 5); amtInp.value = String(amount); } }),
-        el('div', { class: 'grow', style: 'flex:1' }, [amtInp]),
-        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '+$5', onclick: () => { amount += 5; amtInp.value = String(amount); } }),
+      el('div', { class: 'inline', style: 'margin-top:6px;flex-wrap:wrap' }, [
+        el('div', { class: 'grow muted', style: 'flex:1', text: 'Slide ($5 fast, $1 slow) or type' }),
+        ctl.num,
+        ctl.range,
       ]));
 
     if (kind === 'cash') {
@@ -1082,7 +1132,13 @@ function openGameModal(game) {
     manual = winners.length > 1; // multiple winners => split view; else winner-takes-all view
   }
 
-  const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
+  // Clicking outside the sheet must never silently discard entries: if anything
+  // has been entered, ask first; an untouched modal just closes.
+  const isDirty = () => !!name.trim() || selected.size > 0;
+  const bg = el('div', { class: 'modal-bg', onclick: (e) => {
+    if (e.target !== bg) return;
+    if (!isDirty() || confirm('Discard this game? Your entries will be lost.')) bg.remove();
+  } });
   const modal = el('div', { class: 'modal' });
   bg.append(modal);
   document.body.append(bg);
@@ -1095,14 +1151,10 @@ function openGameModal(game) {
 
   const contribOf = (id) => (contribs[id] != null ? contribs[id] : stake);
   // Set a player's buy-in; the last edited amount becomes the default for newly
-  // selected players. syncInput refreshes the row's field (for −/+ button edits).
-  function setAmt(pid, v, syncInput) {
+  // selected players. The money control manages its own display, so no rebuild.
+  function setAmt(pid, v) {
     contribs[pid] = Math.max(0, Math.round(v || 0));
     stake = contribs[pid];
-    if (syncInput) {
-      const inp = modal.querySelector('input.buyamt[data-pid="' + pid + '"]');
-      if (inp) inp.value = String(contribs[pid]);
-    }
     updateTotals();
   }
   const selPlayers = () => state.players.filter((p) => selected.has(p.id));
@@ -1161,19 +1213,13 @@ function openGameModal(game) {
         el('div', { class: 'grow title', text: p.name, style: 'cursor:pointer', onclick: toggle }),
       ]);
       if (sel) {
-        const amtInp = el('input', { class: 'inp buyamt', type: 'number', min: '0', step: '1', inputmode: 'numeric',
-          'data-pid': p.id, style: 'width:76px;text-align:center;margin-top:0;padding:8px 4px',
-          value: String(contribOf(p.id)),
-          oninput: (e) => setAmt(p.id, parseInt(e.target.value || '0', 10), false) });
-        row.append(el('div', { class: 'stepper' }, [
-          el('button', { text: '−', title: '-$5', onclick: () => setAmt(p.id, contribOf(p.id) - 5, true) }),
-          amtInp,
-          el('button', { text: '+', title: '+$5', onclick: () => setAmt(p.id, contribOf(p.id) + 5, true) }),
-        ]));
+        row.style.flexWrap = 'wrap';
+        const ctl = moneyControl(contribOf(p.id), (v) => setAmt(p.id, v), 'buyamt', p.id);
+        row.append(ctl.num, ctl.range);
       }
       modal.append(row);
     }
-    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: '−/+ move $5 · field arrows $1 · or type an exact amount. Rebuy = raise that player\'s total.' }));
+    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: 'Slide for $5 steps — drag slowly for $1 — or type an exact amount. Rebuy = raise that player\'s total.' }));
     // Inline add-player (so you can build the roster right here if nobody's added yet)
     const addBuf = { v: '' };
     const doAddPlayer = async () => {
@@ -1244,10 +1290,8 @@ function openGameModal(game) {
         const ord = (n) => n + (['st', 'nd', 'rd'][n - 1] || 'th');
         for (const p of selPlayers()) {
           const placeIdx = placeOrder.indexOf(p.id);
-          const inp = el('input', { class: 'inp payin', type: 'number', min: '0', step: '5', value: String(payouts[p.id] || 0),
-            style: 'width:96px;flex:none;text-align:center;margin-top:0;padding:8px 4px',
-            oninput: (e) => { payouts[p.id] = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
-          modal.append(el('div', { class: 'check' + (placeIdx >= 0 ? ' sel' : ''), onclick: (e) => {
+          const ctl = moneyControl(payouts[p.id] || 0, (v) => { payouts[p.id] = v; updateTotals(); }, 'payin', p.id);
+          modal.append(el('div', { class: 'check' + (placeIdx >= 0 ? ' sel' : ''), style: 'flex-wrap:wrap', onclick: (e) => {
             if (e.target.tagName === 'INPUT' || !pendingPcts || placeOrder.includes(p.id)) return;
             placeOrder.push(p.id);
             const shares = presetSplit(pot(), pendingPcts);
@@ -1257,7 +1301,8 @@ function openGameModal(game) {
           } }, [
             placeIdx >= 0 ? el('span', { class: 'pos', style: 'font-weight:800;min-width:34px', text: ord(placeIdx + 1) }) : null,
             el('div', { class: 'grow title', text: p.name }),
-            inp,
+            ctl.num,
+            ctl.range,
           ]));
         }
         modal.append(el('div', { class: 'balanceline', style: 'margin-top:10px' }, [balanceLabel()]));
