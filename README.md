@@ -97,14 +97,6 @@ This repo is public so free GitHub Pages works. One-time setup:
 
 `.nojekyll` is included so Pages serves the files as-is.
 
-## Pending database update
-
-The cash/expense feature and custom-game retention need two small tables that haven't
-been applied yet. One-time step: open the
-[SQL editor](https://supabase.com/dashboard/project/vmambvgovdxepgejdgcy/sql/new), paste
-the contents of `supabase/migrations/0002_adjustments.sql`, and Run. Until then the app
-works fine — the 💵 button just shows a reminder, and custom game names don't persist.
-
 ## Notes & tradeoffs
 
 - **Needs internet.** Live sync means the app talks to Supabase; it does not work fully
