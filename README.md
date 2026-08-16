@@ -41,8 +41,26 @@ Live app: enable GitHub Pages (see below) — it will be at
 5. **Settle Up** tab — the final who-pays-whom list, minimized.
 6. **Share** button — copies the trip link. Send it to the group; everyone joins the same
    live trip.
-7. **History** (button on the home screen) — totals across every trip: money that changed
-   hands all-time, **by trip** (tap to open it), by year, by game, and by person.
+7. **Cash / expenses** (button on the Games tab) — money outside of games:
+   - *Cash handoff*: someone hands someone cash mid-trip (a loan or early payment). The
+     payer is owed it back at settlement.
+   - *Shared expense*: someone fronts a bill (pizza, gas) split evenly among whoever you
+     pick; odd dollars are eaten by the payer.
+   Both flow into the Tally and Settle Up, but are **excluded from gambling stats**.
+8. **Statements** (Settle Up tab) — 📋 copy the settlement for the group chat, expand any
+   player's personal statement (every game, adjustments, total, who they pay) and copy it,
+   or ⬇️ download the full journal as CSV.
+9. **History** (button on the home screen) — across every trip, finished games only:
+   - **Leaderboard** — W–L record, win %, biggest single win, lifetime net (🥇🥈🥉).
+   - **Head-to-head** — who owns whom: losses attributed to winners pro-rata per game,
+     netted all-time ("Jared over Dugan · $340").
+   - **Records** — biggest pot, biggest single win, longest win streak, largest stake.
+   - **Player profiles** — each person's best & worst games; tap to expand the full
+     per-game breakdown.
+   - Plus totals **by trip** (tap to open), by year, and by game.
+10. **Payout presets** (game editor, split mode) — one-tap **70/30**, **70/20/10**,
+    **50/50 chop**, or **Custom %**: tap players in finishing order and the pot divides
+    itself (odd dollars to 1st).
 
 On the winner screen, every player shows their **live net** (winner's gain, everyone
 else's loss) so you can see the outcome as you add rebuys, before saving.
@@ -78,6 +96,14 @@ This repo is public so free GitHub Pages works. One-time setup:
 3. After a minute the site is live at `https://dancin8bear5.github.io/the-ledger/`.
 
 `.nojekyll` is included so Pages serves the files as-is.
+
+## Pending database update
+
+The cash/expense feature and custom-game retention need two small tables that haven't
+been applied yet. One-time step: open the
+[SQL editor](https://supabase.com/dashboard/project/vmambvgovdxepgejdgcy/sql/new), paste
+the contents of `supabase/migrations/0002_adjustments.sql`, and Run. Until then the app
+works fine — the 💵 button just shows a reminder, and custom game names don't persist.
 
 ## Notes & tradeoffs
 

@@ -205,7 +205,9 @@ let state = {
   loading: true,
   customGames: [],       // saved custom game names (global)
   homeView: 'home',      // 'home' | 'history' when no trip is open
-  historyRaw: null,      // { games, lines, players } across all trips
+  historyRaw: null,      // { games, lines, players, trips } across all trips
+  adjustments: [],       // this trip's cash handoffs / shared expenses
+  adjustmentsAvailable: true, // false when the adjustments table doesn't exist yet
 };
 
 // Global custom game names (retained across trips/devices).
@@ -226,14 +228,17 @@ async function rememberGameName(name) {
 async function loadAll() {
   const id = state.tripId;
   if (!id) { state.loading = false; return render(); }
-  const [{ data: trip }, { data: players }, { data: games }] = await Promise.all([
+  const [{ data: trip }, { data: players }, { data: games }, adjRes] = await Promise.all([
     db.from('trips').select('*').eq('id', id).maybeSingle(),
     db.from('players').select('*').eq('trip_id', id).order('name'),
     db.from('games').select('*, game_lines(*)').eq('trip_id', id).order('played_at', { ascending: false }),
+    db.from('adjustments').select('*').eq('trip_id', id).order('created_at', { ascending: false }),
   ]);
   state.trip = trip || null;
   state.players = players || [];
   state.games = (games || []).map((g) => ({ ...g, lines: g.game_lines || [] }));
+  state.adjustmentsAvailable = !adjRes.error;
+  state.adjustments = adjRes.data || [];
   state.loading = false;
   if (state.trip) rememberTrip(state.trip.id, state.trip.name);
   else if (id) forgetTrip(id); // trip was deleted elsewhere
@@ -269,6 +274,7 @@ function subscribeRealtime(id) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: 'trip_id=eq.' + id }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'games', filter: 'trip_id=eq.' + id }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'game_lines' }, scheduleRefetch)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'adjustments', filter: 'trip_id=eq.' + id }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: 'id=eq.' + id }, scheduleRefetch)
     .subscribe();
 }
@@ -277,7 +283,8 @@ function subscribeRealtime(id) {
 const gamePaid = (g) => g.lines.reduce((s, l) => s + l.payout, 0);
 const gameOpen = (g) => gamePaid(g) === 0;
 
-// derive: flat lines with player names, for the engine (settled games only)
+// derive: flat lines with player names, for the engine (settled games only,
+// plus adjustment deltas — cash handoffs and shared expenses)
 function tripLines() {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const out = [];
@@ -286,6 +293,14 @@ function tripLines() {
     for (const l of g.lines) {
       const name = nameById[l.player_id];
       if (name) out.push({ name, contribution: l.contribution, payout: l.payout });
+    }
+  }
+  for (const a of state.adjustments) {
+    for (const l of (a.lines || [])) {
+      const name = nameById[l.player_id];
+      if (!name || !l.delta) continue;
+      // delta > 0: owed more at settlement (like a payout); delta < 0: owes more.
+      out.push({ name, contribution: l.delta < 0 ? -l.delta : 0, payout: l.delta > 0 ? l.delta : 0 });
     }
   }
   return out;
@@ -349,6 +364,16 @@ async function deleteGame(id) {
 async function deleteTrip(id) {
   await db.from('trips').delete().eq('id', id);
   forgetTrip(id);
+}
+// Adjustments: { kind: 'cash'|'expense', note, amount, lines: [{player_id, delta}] }
+async function saveAdjustment({ id, kind, note, amount, lines }) {
+  if (id) await db.from('adjustments').update({ kind, note, amount, lines }).eq('id', id);
+  else await db.from('adjustments').insert({ trip_id: state.tripId, kind, note, amount, lines });
+  scheduleRefetch();
+}
+async function deleteAdjustment(id) {
+  await db.from('adjustments').delete().eq('id', id);
+  scheduleRefetch();
 }
 
 // ---------- render ----------
@@ -454,17 +479,28 @@ function renderHistory() {
   const linesByGame = {};
   for (const l of lines) (linesByGame[l.game_id] || (linesByGame[l.game_id] = [])).push(l);
 
+  // Finished games only — in-progress games have no result yet and adjustments
+  // (transfers/expenses) are not gambling outcomes, so neither is counted here.
+  const finished = games.filter((g) => (linesByGame[g.id] || []).some((l) => l.payout > 0));
+
   let total = 0;
   const byYear = {}, byGame = {}, byPerson = {}, byTrip = {};
-  for (const g of games) {
+  // gameNets: per finished game, [{name, net}] — feeds leaderboard/head-to-head/records
+  const gameNets = [];
+  for (const g of finished) {
     const ls = linesByGame[g.id] || [];
-    let moved = 0;
+    const nets = [];
+    let moved = 0, pot = 0;
     for (const l of ls) {
       const net = l.payout - l.contribution;
+      pot += l.contribution;
       if (net > 0) moved += net;                 // money that changed hands this game
       const nm = pname[l.player_id];
-      if (nm) byPerson[nm] = (byPerson[nm] || 0) + net;
+      if (!nm) continue;
+      byPerson[nm] = (byPerson[nm] || 0) + net;
+      nets.push({ name: nm, net, contribution: l.contribution });
     }
+    gameNets.push({ gname: g.name, when: g.played_at, pot, lines: nets });
     total += moved;
     const yr = new Date(g.played_at).getFullYear();
     byYear[yr] = (byYear[yr] || 0) + moved;
@@ -473,11 +509,110 @@ function renderHistory() {
     bt.moved += moved; bt.games += 1;
   }
 
-  wrap.append(el('div', { class: 'card', style: 'text-align:center' }, [
+  wrap.append(el('div', { class: 'card', style: 'text-align:center;border-top:4px solid var(--accent)' }, [
     el('div', { class: 'muted', text: 'Total money that changed hands (all time)' }),
     el('div', { class: 'money', style: 'font-size:30px;margin-top:4px', text: money(total) }),
-    el('div', { class: 'muted', style: 'margin-top:4px', text: games.length + ' games · ' + Object.keys(byTrip).length + ' trip(s) · ' + Object.keys(byYear).length + ' year(s)' }),
+    el('div', { class: 'muted', style: 'margin-top:4px', text: finished.length + ' games · ' + Object.keys(byTrip).length + ' trip(s) · ' + Object.keys(byYear).length + ' year(s)' }),
   ]));
+
+  // ---- Leaderboard (per person: played, wins, win %, biggest win, lifetime net)
+  const stats = {};
+  for (const g of gameNets) {
+    for (const l of g.lines) {
+      const s = stats[l.name] || (stats[l.name] = { played: 0, wins: 0, net: 0, biggest: 0, maxStake: 0, streak: 0, bestStreak: 0 });
+      s.played += 1;
+      s.net += l.net;
+      if (l.net > 0) s.wins += 1;
+      if (l.net > s.biggest) s.biggest = l.net;
+      if (l.contribution > s.maxStake) s.maxStake = l.contribution;
+    }
+  }
+  // win streaks: walk games in time order
+  for (const g of [...gameNets].sort((a, b) => (a.when < b.when ? -1 : 1))) {
+    for (const l of g.lines) {
+      const s = stats[l.name];
+      s.streak = l.net > 0 ? s.streak + 1 : 0;
+      if (s.streak > s.bestStreak) s.bestStreak = s.streak;
+    }
+  }
+  wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Leaderboard' }));
+  Object.entries(stats).sort((a, b) => b[1].net - a[1].net).forEach(([nm, s], i) => {
+    const medal = ['🥇', '🥈', '🥉'][i] || '';
+    wrap.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow' }, [
+        el('div', { class: 'title', text: nm }),
+        el('div', { class: 'muted', text: (medal ? medal + ' ' : '') + s.wins + '–' + (s.played - s.wins) +
+          ' · ' + Math.round((s.wins / s.played) * 100) + '% wins · biggest ' + signed(s.biggest) }),
+      ]),
+      el('div', { class: s.net > 0 ? 'pos' : s.net < 0 ? 'neg' : 'zero', text: signed(s.net) }),
+    ]));
+  });
+
+  // ---- Head-to-head (who owns whom, losses attributed pro-rata to winners)
+  const flows = pairwiseFlows(gameNets.map((g) => g.lines));
+  wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Head-to-head' }));
+  if (!flows.length) wrap.append(el('div', { class: 'muted', text: 'No finished games yet.' }));
+  flows.slice(0, 15).forEach((f) => {
+    wrap.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow title', text: f.to + ' over ' + f.from }),
+      el('div', { class: 'money', text: money(f.amount) }),
+    ]));
+  });
+  if (flows.length > 15) wrap.append(el('div', { class: 'muted', style: 'margin-top:6px;text-align:center', text: '+ ' + (flows.length - 15) + ' more pairs' }));
+
+  // ---- Records
+  wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Records' }));
+  if (gameNets.length) {
+    const biggestPot = gameNets.reduce((a, b) => (b.pot > a.pot ? b : a));
+    let bigWin = { name: '—', net: 0, gname: '' };
+    for (const g of gameNets) for (const l of g.lines) if (l.net > bigWin.net) bigWin = { name: l.name, net: l.net, gname: g.gname };
+    const streakKing = Object.entries(stats).reduce((a, b) => (b[1].bestStreak > a[1].bestStreak ? b : a));
+    const stakeKing = Object.entries(stats).reduce((a, b) => (b[1].maxStake > a[1].maxStake ? b : a));
+    const rec = (label, val) => wrap.append(el('div', { class: 'row-item' }, [
+      el('div', { class: 'grow muted', text: label }),
+      el('div', { class: 'money', text: val }),
+    ]));
+    rec('Biggest pot — ' + biggestPot.gname, money(biggestPot.pot));
+    rec('Biggest single win — ' + bigWin.name + ' · ' + bigWin.gname, signed(bigWin.net));
+    rec('Longest win streak — ' + streakKing[0], streakKing[1].bestStreak + ' game' + (streakKing[1].bestStreak === 1 ? '' : 's'));
+    rec('Largest single stake — ' + stakeKing[0], money(stakeKing[1].maxStake));
+  } else {
+    wrap.append(el('div', { class: 'muted', text: 'No finished games yet.' }));
+  }
+
+  // ---- Player profiles (lifetime net by game type; tap to expand)
+  const profile = {}; // name -> { gname: net }
+  for (const g of gameNets) for (const l of g.lines) {
+    (profile[l.name] || (profile[l.name] = {}))[g.gname] = ((profile[l.name] || {})[g.gname] || 0) + l.net;
+  }
+  wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Player profiles — best & worst games' }));
+  for (const [nm, perGame] of Object.entries(profile).sort((a, b) => a[0] < b[0] ? -1 : 1)) {
+    const entries = Object.entries(perGame).sort((a, b) => b[1] - a[1]);
+    const best = entries[0];
+    const worst = entries[entries.length - 1];
+    const open = expandedProfiles.has(nm);
+    const row = el('div', { class: 'row-item', style: 'flex-wrap:wrap', onclick: () => {
+      if (expandedProfiles.has(nm)) expandedProfiles.delete(nm); else expandedProfiles.add(nm);
+      render();
+    } }, [
+      el('div', { class: 'grow' }, [
+        el('div', { class: 'title', text: (open ? '▾ ' : '▸ ') + nm }),
+        el('div', { class: 'muted', text: 'Best: ' + best[0] + ' ' + signed(best[1]) +
+          (worst[0] !== best[0] ? ' · Worst: ' + worst[0] + ' ' + signed(worst[1]) : '') }),
+      ]),
+    ]);
+    if (open) {
+      const detail = el('div', { style: 'width:100%;margin-top:8px' });
+      for (const [gn, v] of entries) {
+        detail.append(el('div', { class: 'inline', style: 'justify-content:space-between;padding:3px 0' }, [
+          el('span', { class: 'muted', text: gn }),
+          el('span', { class: v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero', style: 'font-size:13px', text: signed(v) }),
+        ]));
+      }
+      row.append(detail);
+    }
+    wrap.append(row);
+  }
 
   const section = (title, rows) => {
     wrap.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: title }));
@@ -507,11 +642,10 @@ function renderHistory() {
 
   section('By year', Object.entries(byYear).sort((a, b) => b[0] - a[0]).map(([y, v]) => [String(y), money(v)]));
   section('By game', Object.entries(byGame).sort((a, b) => b[1] - a[1]).map(([g, v]) => [g, money(v)]));
-  section('By person (net won / lost, all time)',
-    Object.entries(byPerson).sort((a, b) => b[1] - a[1]).map(([nm, v]) => [nm, signed(v), v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero']));
 
   return wrap;
 }
+const expandedProfiles = new Set();
 
 function renderHeader() {
   const header = el('header', { class: 'app' });
@@ -586,26 +720,67 @@ function renderPlayers() {
 function renderGames() {
   const box = el('div', {});
   if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players first (Players tab).' })); return box; }
-  if (!state.games.length) box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games yet.<br>Tap ＋ in the top bar to log the first one.' }));
+
+  box.append(el('button', { class: 'btn ghost block', style: 'margin-top:12px', text: '💵 Log cash handoff / shared expense',
+    onclick: () => {
+      if (!state.adjustmentsAvailable) { toast('Needs the database update — see README (0002_adjustments.sql)'); return; }
+      openAdjModal(null);
+    } }));
+
+  if (!state.games.length && !state.adjustments.length) {
+    box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games yet.<br>Tap ＋ in the top bar to log the first one.' }));
+  }
+
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
-  for (const g of state.games) {
-    const pot = g.lines.reduce((s, l) => s + l.contribution, 0);
-    const paid = g.lines.reduce((s, l) => s + l.payout, 0);
-    const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
-      .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
-    const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
-    if (paid === 0) meta.push('⏳ in progress');
-    else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
-    if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
-    box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
-      el('div', { class: 'grow' }, [
-        el('div', { class: 'title', text: g.name }),
-        el('div', { class: 'muted', text: meta.join('  ·  ') }),
-      ]),
-      el('div', { class: 'money', text: money(pot) }),
-    ]));
+
+  // Games and adjustments interleaved chronologically, newest first.
+  const items = [
+    ...state.games.map((g) => ({ when: g.played_at, game: g })),
+    ...state.adjustments.map((a) => ({ when: a.created_at, adj: a })),
+  ].sort((x, y) => (x.when < y.when ? 1 : -1));
+
+  for (const item of items) {
+    if (item.game) {
+      const g = item.game;
+      const pot = g.lines.reduce((s, l) => s + l.contribution, 0);
+      const paid = g.lines.reduce((s, l) => s + l.payout, 0);
+      const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
+        .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
+      const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
+      if (paid === 0) meta.push('⏳ in progress');
+      else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
+      if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
+      box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
+        el('div', { class: 'grow' }, [
+          el('div', { class: 'title', text: g.name }),
+          el('div', { class: 'muted', text: meta.join('  ·  ') }),
+        ]),
+        el('div', { class: 'money', text: money(pot) }),
+      ]));
+    } else {
+      const a = item.adj;
+      box.append(el('div', { class: 'row-item', onclick: () => openAdjModal(a) }, [
+        el('div', { class: 'grow' }, [
+          el('div', { class: 'title', text: '💵 ' + adjSummary(a, nameById) }),
+          el('div', { class: 'muted', text: fmtTime(a.created_at) + (a.note ? '  ·  ' + a.note : '') }),
+        ]),
+        el('div', { class: 'money', text: money(a.amount || 0) }),
+      ]));
+    }
   }
   return box;
+}
+
+// One-line description of an adjustment, e.g. "Ryan → Dugan · cash" or "Bill fronted ÷ 4".
+function adjSummary(a, nameById) {
+  const lines = a.lines || [];
+  const payer = lines.find((l) => l.delta > 0);
+  if (a.kind === 'cash') {
+    const recv = lines.find((l) => l.delta < 0);
+    return (nameById[payer?.player_id] || '?') + ' → ' + (nameById[recv?.player_id] || '?') + ' · cash';
+  }
+  const owers = lines.filter((l) => l.delta < 0).length;
+  return (nameById[payer?.player_id] || '?') + ' fronted · split ÷ ' + (owers + 1);
 }
 
 function renderTally() {
@@ -631,13 +806,14 @@ function renderSettle() {
   const noteOpen = () => { if (openCount) box.append(el('div', { class: 'card', style: 'border-color:var(--gold)' }, [
     el('div', { class: 'muted', text: '⏳ ' + openCount + ' game' + (openCount === 1 ? '' : 's') + ' in progress — not counted until you set the winner.' }),
   ])); };
-  if (!state.games.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
+  if (!state.games.length && !state.adjustments.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
   const b = balances();
   const payments = minimize(b);
   const res = residual(b);
   if (!payments.length) {
     noteOpen();
     box.append(el('div', { class: 'empty', html: '<div class="big">✅</div><b>All square</b><br>Everyone is even — no payments needed.' }));
+    appendStatementsAndExport(box, b, payments);
     return box;
   }
   noteOpen();
@@ -653,9 +829,236 @@ function renderSettle() {
       el('div', { class: 'money', text: money(p.amount) }),
     ]));
   }
+  appendStatementsAndExport(box, b, payments);
   return box;
 }
+
+// ---------- statements + export ----------
+
+async function copyText(text, doneMsg) {
+  try {
+    if (navigator.share) { await navigator.share({ text }); return; }
+  } catch (_) { /* fall through to clipboard */ }
+  try { await navigator.clipboard.writeText(text); toast(doneMsg); }
+  catch (_) { toast('Could not copy'); }
+}
+
+function settlementText(payments) {
+  const head = '🐻 The Ledger — ' + state.trip.name + '\n';
+  if (!payments.length) return head + 'All square — no payments needed.';
+  return head + 'Settle up (' + payments.length + ' payment' + (payments.length === 1 ? '' : 's') + '):\n' +
+    payments.map((p) => p.from + ' → ' + p.to + ': ' + money(p.amount)).join('\n');
+}
+
+// Per-player statement: every finished game they played, adjustments, total, settlement role.
+function playerStatement(name, bals, payments) {
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  const rows = [];
+  const chronGames = [...state.games].sort((a, b) => (a.played_at < b.played_at ? -1 : 1));
+  for (const g of chronGames) {
+    const line = g.lines.find((l) => nameById[l.player_id] === name);
+    if (!line) continue;
+    if (gameOpen(g)) rows.push({ label: g.name + ' (' + fmtTime(g.played_at) + ')', text: 'in progress' });
+    else rows.push({ label: g.name + ' (' + fmtTime(g.played_at) + ')', net: line.payout - line.contribution });
+  }
+  for (const a of state.adjustments) {
+    const line = (a.lines || []).find((l) => nameById[l.player_id] === name);
+    if (!line || !line.delta) continue;
+    rows.push({ label: '💵 ' + adjSummary(a, nameById) + (a.note ? ' — ' + a.note : ''), net: line.delta });
+  }
+  const total = bals[name] ?? 0;
+  const pays = payments.filter((p) => p.from === name);
+  const gets = payments.filter((p) => p.to === name);
+  let settle;
+  if (pays.length) settle = 'Pays: ' + pays.map((p) => p.to + ' ' + money(p.amount)).join(', ');
+  else if (gets.length) settle = 'Collects: ' + gets.map((p) => p.from + ' ' + money(p.amount)).join(', ');
+  else settle = 'All square';
+  return { rows, total, settle };
+}
+
+function statementText(name, st) {
+  return name + ' — ' + state.trip.name + '\n' +
+    st.rows.map((r) => r.label + ': ' + (r.net != null ? signed(r.net) : r.text)).join('\n') +
+    '\nTotal: ' + signed(st.total) + '\n' + st.settle;
+}
+
+// Full journal CSV: one row per game line and adjustment line.
+function journalCsv() {
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  const esc = (v) => '"' + String(v).replaceAll('"', '""') + '"';
+  const rows = [['type', 'name', 'time', 'player', 'in', 'out', 'net']];
+  for (const g of [...state.games].sort((a, b) => (a.played_at < b.played_at ? -1 : 1))) {
+    for (const l of g.lines) {
+      rows.push(['game', g.name, g.played_at, nameById[l.player_id] || '?', l.contribution, l.payout, l.payout - l.contribution]);
+    }
+  }
+  for (const a of state.adjustments) {
+    for (const l of (a.lines || [])) {
+      rows.push([a.kind, a.note || adjSummary(a, nameById), a.created_at, nameById[l.player_id] || '?',
+        l.delta < 0 ? -l.delta : 0, l.delta > 0 ? l.delta : 0, l.delta]);
+    }
+  }
+  return rows.map((r) => r.map(esc).join(',')).join('\n');
+}
+
+function downloadCsv() {
+  const blob = new Blob([journalCsv()], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: 'the-ledger-' + state.trip.name.replace(/[^\w-]+/g, '_') + '.csv' });
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 500);
+}
+
+const expandedStmts = new Set();
+
+function appendStatementsAndExport(box, bals, payments) {
+  box.append(el('div', { class: 'inline', style: 'margin-top:16px' }, [
+    el('button', { class: 'btn ghost small', style: 'flex:1', text: '📋 Copy settlement',
+      onclick: () => copyText(settlementText(payments), 'Settlement copied') }),
+    el('button', { class: 'btn ghost small', style: 'flex:1', text: '⬇️ Download CSV', onclick: downloadCsv }),
+  ]));
+
+  box.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Statements' }));
+  for (const p of state.players) {
+    const st = playerStatement(p.name, bals, payments);
+    const open = expandedStmts.has(p.name);
+    const row = el('div', { class: 'row-item', style: 'flex-wrap:wrap', onclick: () => {
+      if (expandedStmts.has(p.name)) expandedStmts.delete(p.name); else expandedStmts.add(p.name);
+      render();
+    } }, [
+      el('div', { class: 'grow title', text: (open ? '▾ ' : '▸ ') + p.name }),
+      el('div', { class: st.total > 0 ? 'pos' : st.total < 0 ? 'neg' : 'zero', text: signed(st.total) }),
+    ]);
+    if (open) {
+      const detail = el('div', { style: 'width:100%;margin-top:8px' });
+      for (const r of st.rows) {
+        detail.append(el('div', { class: 'inline', style: 'justify-content:space-between;padding:3px 0' }, [
+          el('span', { class: 'muted', text: r.label }),
+          r.net != null
+            ? el('span', { class: r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : 'zero', style: 'font-size:13px', text: signed(r.net) })
+            : el('span', { class: 'muted', text: r.text }),
+        ]));
+      }
+      detail.append(el('div', { class: 'muted', style: 'margin-top:6px', text: st.settle }));
+      detail.append(el('button', { class: 'btn ghost small', style: 'margin-top:8px', text: '📋 Copy statement',
+        onclick: (e) => { e.stopPropagation(); copyText(statementText(p.name, st), 'Statement copied'); } }));
+      row.append(detail);
+    }
+    box.append(row);
+  }
+}
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---------- adjustment modal (cash handoff / shared expense) ----------
+function openAdjModal(adj) {
+  const editing = !!adj;
+  let kind = adj ? adj.kind : 'cash';
+  let amount = adj ? (adj.amount || 0) : 0;
+  let note = adj ? (adj.note || '') : '';
+  let payerId = null;
+  let recvId = null;
+  let sharers = new Set(state.players.map((p) => p.id)); // expense default: everyone
+  if (adj) {
+    const pos = (adj.lines || []).find((l) => l.delta > 0);
+    payerId = pos ? pos.player_id : null;
+    if (kind === 'cash') {
+      const neg = (adj.lines || []).find((l) => l.delta < 0);
+      recvId = neg ? neg.player_id : null;
+    } else {
+      sharers = new Set((adj.lines || []).filter((l) => l.delta < 0).map((l) => l.player_id));
+      if (payerId) sharers.add(payerId);
+    }
+  }
+
+  const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) bg.remove(); } });
+  const modal = el('div', { class: 'modal' });
+  bg.append(modal);
+  document.body.append(bg);
+
+  function rebuild() { modal.innerHTML = ''; build(); }
+
+  function pickList(title, isSel, onPick) {
+    modal.append(el('div', { class: 'section-h', text: title }));
+    for (const p of state.players) {
+      const sel = isSel(p.id);
+      modal.append(el('div', { class: 'check' + (sel ? ' sel' : ''), onclick: () => onPick(p.id) }, [
+        el('div', { class: 'box' }),
+        el('div', { class: 'grow title', text: p.name }),
+      ]));
+    }
+  }
+
+  function build() {
+    modal.append(el('div', { class: 'bar' }, [
+      el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
+      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit entry' : 'Cash / expense' })]),
+      el('button', { class: 'btn small', text: 'Save', onclick: onSave }),
+    ]));
+
+    // kind toggle
+    const seg = el('div', { class: 'inline', style: 'margin-top:12px' });
+    for (const [k, label] of [['cash', '💵 Cash handoff'], ['expense', '🧾 Shared expense']]) {
+      seg.append(el('button', { class: 'btn small ' + (kind === k ? '' : 'ghost'), style: 'flex:1',
+        text: label, onclick: () => { kind = k; rebuild(); } }));
+    }
+    modal.append(seg);
+
+    const amtInp = el('input', { class: 'inp', type: 'number', min: '0', step: '1', inputmode: 'numeric', style: 'text-align:center',
+      value: String(amount), oninput: (e) => (amount = Math.max(0, parseInt(e.target.value || '0', 10))) });
+    modal.append(el('label', { class: 'field', text: 'Amount' }),
+      el('div', { class: 'inline', style: 'margin-top:6px' }, [
+        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '−$5', onclick: () => { amount = Math.max(0, amount - 5); amtInp.value = String(amount); } }),
+        el('div', { class: 'grow', style: 'flex:1' }, [amtInp]),
+        el('button', { class: 'btn ghost', style: 'min-width:54px', text: '+$5', onclick: () => { amount += 5; amtInp.value = String(amount); } }),
+      ]));
+
+    if (kind === 'cash') {
+      pickList('Who paid (hands over the cash)', (id) => payerId === id, (id) => { payerId = id; if (recvId === id) recvId = null; rebuild(); });
+      pickList('Who received it', (id) => recvId === id, (id) => { recvId = id; if (payerId === id) payerId = null; rebuild(); });
+      modal.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'The payer is owed this back at settlement (an early payment or a loan).' }));
+    } else {
+      pickList('Who fronted the money', (id) => payerId === id, (id) => { payerId = id; sharers.add(id); rebuild(); });
+      pickList('Who splits it (tap to toggle)', (id) => sharers.has(id), (id) => {
+        if (sharers.has(id) && id !== payerId) sharers.delete(id); else sharers.add(id);
+        rebuild();
+      });
+      modal.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'Split evenly; odd dollars are eaten by the payer.' }));
+    }
+
+    const noteInp = el('input', { class: 'inp', value: note, placeholder: 'Note (e.g. pizza)', oninput: (e) => (note = e.target.value) });
+    modal.append(el('label', { class: 'field', text: 'Note (optional)' }), noteInp);
+
+    if (editing) {
+      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--neg)', text: 'Delete entry',
+        onclick: () => { if (confirm('Delete this entry?')) { deleteAdjustment(adj.id); bg.remove(); } } }));
+    }
+  }
+
+  function onSave() {
+    if (amount <= 0) { toast('Enter an amount'); return; }
+    if (!payerId) { toast('Pick who paid'); return; }
+    let lines;
+    if (kind === 'cash') {
+      if (!recvId) { toast('Pick who received it'); return; }
+      lines = [
+        { player_id: payerId, delta: amount },
+        { player_id: recvId, delta: -amount },
+      ];
+    } else {
+      const others = [...sharers].filter((id) => id !== payerId);
+      if (!others.length) { toast('Pick at least one other person to split with'); return; }
+      const n = sharers.has(payerId) ? others.length + 1 : others.length;
+      const base = Math.floor(amount / n);
+      lines = others.map((id) => ({ player_id: id, delta: -base }));
+      lines.push({ player_id: payerId, delta: base * others.length });
+    }
+    saveAdjustment({ id: adj ? adj.id : null, kind, note: note.trim(), amount, lines });
+    bg.remove();
+  }
+
+  build();
+}
 
 // ---------- game modal ----------
 function openGameModal(game) {
@@ -683,6 +1086,12 @@ function openGameModal(game) {
   const modal = el('div', { class: 'modal' });
   bg.append(modal);
   document.body.append(bg);
+
+  // Payout preset state: while pendingPcts is set, tapping payout rows assigns
+  // finishing places and fills amounts from presetSplit().
+  let pendingPcts = null;
+  let presetLabel = null;
+  let placeOrder = [];
 
   const contribOf = (id) => (contribs[id] != null ? contribs[id] : stake);
   // Set a player's buy-in; the last edited amount becomes the default for newly
@@ -806,10 +1215,50 @@ function openGameModal(game) {
         if (!winnerId) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: "No winner yet? Just tap Save — the game stays open and won't affect Settle Up until you set the result." }));
       } else {
         modal.append(el('div', { class: 'section-h', text: 'Payouts' }));
+
+        // Preset chips: one-tap payout structures
+        const chipRow = el('div', { class: 'inline', style: 'flex-wrap:wrap;gap:6px;margin-top:4px' });
+        const PRESETS = [['70/30', [70, 30]], ['70/20/10', [70, 20, 10]], ['50/50 chop', [50, 50]], ['Custom %', null]];
+        for (const [label, pcts] of PRESETS) {
+          const active = presetLabel === label;
+          chipRow.append(el('button', { class: 'btn small ' + (active ? '' : 'ghost'), text: label, onclick: () => {
+            if (active) { pendingPcts = null; presetLabel = null; placeOrder = []; rebuild(); return; }
+            let chosen = pcts;
+            if (!chosen) {
+              const raw = prompt('Percentages, comma-separated (must sum to 100):', '60,30,10');
+              if (!raw) return;
+              chosen = raw.split(',').map((s) => parseInt(s.trim(), 10));
+              if (chosen.some(isNaN) || chosen.reduce((a, b) => a + b, 0) !== 100) { toast('Percentages must sum to 100'); return; }
+            }
+            if (chosen.length > selected.size) { toast('More places than players'); return; }
+            pendingPcts = chosen; presetLabel = label; placeOrder = [];
+            for (const p of selPlayers()) payouts[p.id] = 0;
+            rebuild();
+          } }));
+        }
+        modal.append(chipRow);
+        if (pendingPcts) {
+          modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: 'Tap players below in finishing order (' + pendingPcts.join('/') + '). Odd dollars go to 1st.' }));
+        }
+
+        const ord = (n) => n + (['st', 'nd', 'rd'][n - 1] || 'th');
         for (const p of selPlayers()) {
+          const placeIdx = placeOrder.indexOf(p.id);
           const inp = el('input', { class: 'inp payin', type: 'number', min: '0', step: '5', value: String(payouts[p.id] || 0),
+            style: 'width:96px;flex:none;text-align:center;margin-top:0;padding:8px 4px',
             oninput: (e) => { payouts[p.id] = Math.max(0, parseInt(e.target.value || '0', 10)); updateTotals(); } });
-          modal.append(el('div', { class: 'check' }, [ el('div', { class: 'grow title', text: p.name }), inp ]));
+          modal.append(el('div', { class: 'check' + (placeIdx >= 0 ? ' sel' : ''), onclick: (e) => {
+            if (e.target.tagName === 'INPUT' || !pendingPcts || placeOrder.includes(p.id)) return;
+            placeOrder.push(p.id);
+            const shares = presetSplit(pot(), pendingPcts);
+            payouts[p.id] = shares[placeOrder.length - 1];
+            if (placeOrder.length === pendingPcts.length) { pendingPcts = null; presetLabel = null; }
+            rebuild();
+          } }, [
+            placeIdx >= 0 ? el('span', { class: 'pos', style: 'font-weight:800;min-width:34px', text: ord(placeIdx + 1) }) : null,
+            el('div', { class: 'grow title', text: p.name }),
+            inp,
+          ]));
         }
         modal.append(el('div', { class: 'balanceline', style: 'margin-top:10px' }, [balanceLabel()]));
       }
