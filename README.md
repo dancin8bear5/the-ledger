@@ -101,6 +101,29 @@ This repo is public so free GitHub Pages works. One-time setup:
 Tapping outside an entry sheet never silently discards your work — if you've entered
 anything, the app asks before closing.
 
+## Self-healing & operations
+
+The app assumes trip wifi is bad and recovers on its own:
+
+- **Every write retries** (3 attempts with backoff) before showing a clear error — a
+  momentary blip never silently drops a game.
+- **Reads never fake a deletion**: if the trip can't be fetched, the app keeps the last
+  known data on screen, shows a small *⚠︎ Reconnecting…* pill, and retries with backoff
+  until it succeeds. (Previously a network failure looked like the trip had vanished.)
+- **Realtime resubscribes itself** when the socket drops (phone lock, network switch),
+  with a catch-up refetch on every reconnect; one live channel at a time, no leaks.
+- **Watchdog**: coming back online or returning to the tab re-syncs immediately, and a
+  45-second heartbeat (visible tab only) catches anything realtime missed. Hidden tabs
+  do no work at all — one refetch runs when you come back.
+- **Typing is protected**: a background sync never wipes a field you're mid-typing in.
+- **Crash containment**: a rendering error shows a Reload card instead of a blank page.
+- **Offline shell**: a service worker (network-first, so deploys are never stale) lets
+  the app open with no signal and sit in its reconnecting state; `manifest.webmanifest`
+  makes it installable to the home screen. Not registered on localhost, so development
+  and tests never fight the cache.
+- **Debug handle**: `window.__ledgerDebug` exposes `state`, `render`, `loadAll`,
+  `setConn`, and `scheduleRefetch` in the console for live diagnosis.
+
 ## Notes & tradeoffs
 
 - **Needs internet.** Live sync means the app talks to Supabase; it does not work fully

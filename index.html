@@ -4,6 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0B162A" />
+<link rel="preconnect" href="https://vmambvgovdxepgejdgcy.supabase.co" crossorigin />
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+<link rel="manifest" href="manifest.webmanifest" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230B162A'/><text x='50' y='72' font-size='60' text-anchor='middle'>🐻</text></svg>" />
 <title>The Ledger</title>
 <style>
@@ -379,6 +382,7 @@ let state = {
   historyRaw: null,      // { games, lines, players, trips } across all trips
   adjustments: [],       // this trip's cash handoffs / shared expenses
   adjustmentsAvailable: true, // false when the adjustments table doesn't exist yet
+  connOk: true,          // false while reads/writes/realtime are failing (self-heal)
 };
 
 // Global custom game names (retained across trips/devices).
@@ -395,25 +399,78 @@ async function rememberGameName(name) {
   if (!state.customGames.includes(n)) state.customGames.push(n);
 }
 
+// ---------- self-heal: connection status + resilient reads/writes ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Small fixed pill shown while the app is retrying; cleared on any success.
+// Patched directly (no full render) so it never disturbs what the user is doing.
+function setConn(ok) {
+  state.connOk = ok;
+  let pill = document.getElementById('connpill');
+  if (ok) { if (pill) pill.remove(); return; }
+  if (!pill) {
+    pill = el('div', { id: 'connpill', class: 'toast',
+      style: 'bottom:auto;top:12px;background:#5A2B10;border-color:var(--accent);z-index:100',
+      text: '⚠︎ Reconnecting…' });
+    document.body.append(pill);
+  }
+}
+
+// Write wrapper: every DB write retries on failure (network blips are the norm
+// on a trip) before surfacing a clear error. `fn` must BUILD the query so each
+// attempt issues a fresh request.
+async function dbw(fn, label) {
+  for (let i = 0; ; i++) {
+    let res;
+    try { res = await fn(); } catch (e) { res = { error: e }; }
+    if (!res || !res.error) { setConn(true); return res || {}; }
+    if (i >= 2) {
+      setConn(false);
+      toast('⚠︎ ' + label + ' failed — check your connection and try again');
+      return res;
+    }
+    await sleep(400 * Math.pow(2, i));
+  }
+}
+
 // ---------- data ----------
+let loadBackoff = 800;
+let loadRetryTimer = null;
 async function loadAll() {
   const id = state.tripId;
   if (!id) { state.loading = false; return render(); }
-  const [{ data: trip }, { data: players }, { data: games }, adjRes] = await Promise.all([
-    db.from('trips').select('*').eq('id', id).maybeSingle(),
-    db.from('players').select('*').eq('trip_id', id).order('name'),
-    db.from('games').select('*, game_lines(*)').eq('trip_id', id).order('played_at', { ascending: false }),
-    db.from('adjustments').select('*').eq('trip_id', id).order('created_at', { ascending: false }),
-  ]);
-  state.trip = trip || null;
-  state.players = players || [];
-  state.games = (games || []).map((g) => ({ ...g, lines: g.game_lines || [] }));
-  state.adjustmentsAvailable = !adjRes.error;
-  state.adjustments = adjRes.data || [];
-  state.loading = false;
-  if (state.trip) rememberTrip(state.trip.id, state.trip.name);
-  else if (id) forgetTrip(id); // trip was deleted elsewhere
-  render();
+  try {
+    const [tripRes, playersRes, gamesRes, adjRes] = await Promise.all([
+      db.from('trips').select('*').eq('id', id).maybeSingle(),
+      db.from('players').select('*').eq('trip_id', id).order('name'),
+      db.from('games').select('*, game_lines(*)').eq('trip_id', id).order('played_at', { ascending: false }),
+      db.from('adjustments').select('*').eq('trip_id', id).order('created_at', { ascending: false }),
+    ]);
+    // A fetch failure must NOT be mistaken for a deleted trip — keep the last
+    // known state on screen and retry instead of dumping the user to the landing.
+    if (tripRes.error || playersRes.error || gamesRes.error) {
+      throw tripRes.error || playersRes.error || gamesRes.error;
+    }
+    state.trip = tripRes.data || null;
+    state.players = playersRes.data || [];
+    state.games = (gamesRes.data || []).map((g) => ({ ...g, lines: g.game_lines || [] }));
+    state.adjustmentsAvailable = !adjRes.error;
+    state.adjustments = adjRes.data || [];
+    state.loading = false;
+    setConn(true);
+    loadBackoff = 800;
+    clearTimeout(loadRetryTimer);
+    if (state.trip) rememberTrip(state.trip.id, state.trip.name);
+    else if (id) forgetTrip(id); // genuinely deleted elsewhere (fetch succeeded, no row)
+    render();
+  } catch (_) {
+    state.loading = false; // show whatever we already have instead of a spinner
+    setConn(false);
+    render();
+    clearTimeout(loadRetryTimer);
+    loadRetryTimer = setTimeout(loadAll, loadBackoff);
+    loadBackoff = Math.min(loadBackoff * 2, 10000);
+  }
 }
 
 // Open a trip in-place (no full reload).
@@ -421,6 +478,7 @@ function openTrip(id) {
   state.tripId = id;
   state.trip = null;
   state.loading = true;
+  state.homeView = 'home'; // so ☰ returns to the trip list, not a stale History view
   history.replaceState(null, '', location.pathname + '?t=' + id);
   render();
   loadAll();
@@ -428,26 +486,57 @@ function openTrip(id) {
 }
 // Back to the home screen / trip list.
 function goHome() {
+  unsubscribeRealtime();
   state.tripId = null;
   state.trip = null;
   history.replaceState(null, '', location.pathname);
   render();
 }
 
+// Refetch debounce; while the tab is hidden nothing refetches (saves battery
+// and bandwidth) — one refetch runs when the tab becomes visible again.
 let refetchTimer = null;
+let needsRefetch = false;
 function scheduleRefetch() {
+  if (document.visibilityState === 'hidden') { needsRefetch = true; return; }
   clearTimeout(refetchTimer);
   refetchTimer = setTimeout(loadAll, 150);
 }
 
+// Realtime with a full lifecycle: one live channel at a time (no leaks when
+// switching trips), and automatic resubscribe with backoff when the socket
+// drops — plus a refetch on every (re)subscribe so nothing is missed.
+let rtChannel = null;
+let rtBackoff = 1000;
+function unsubscribeRealtime() {
+  if (!rtChannel) return;
+  const ch = rtChannel;
+  rtChannel = null;
+  try { db.removeChannel(ch); } catch (_) {}
+}
 function subscribeRealtime(id) {
-  db.channel('trip-' + id)
+  unsubscribeRealtime();
+  const ch = db.channel('trip-' + id)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'players', filter: 'trip_id=eq.' + id }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'games', filter: 'trip_id=eq.' + id }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'game_lines' }, scheduleRefetch)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'adjustments', filter: 'trip_id=eq.' + id }, scheduleRefetch)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: 'id=eq.' + id }, scheduleRefetch)
-    .subscribe();
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'trips', filter: 'id=eq.' + id }, scheduleRefetch);
+  rtChannel = ch;
+  ch.subscribe((status) => {
+    if (ch !== rtChannel) return; // superseded by a newer subscription
+    if (status === 'SUBSCRIBED') {
+      rtBackoff = 1000;
+      scheduleRefetch(); // catch anything missed while disconnected
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      setConn(false);
+      const delay = rtBackoff;
+      rtBackoff = Math.min(rtBackoff * 2, 15000);
+      setTimeout(() => {
+        if (state.tripId === id && ch === rtChannel) subscribeRealtime(id);
+      }, delay);
+    }
+  });
 }
 
 // A game is "open" (in progress) until someone has been paid.
@@ -486,12 +575,12 @@ async function createTrip(name, people = []) {
     toast('Trip "' + name + '" already exists');
     return;
   }
-  const { data, error } = await db
-    .from('trips').insert({ name }).select().single();
-  if (error) { toast('Could not create trip'); return; }
+  const { data, error } = await dbw(() => db
+    .from('trips').insert({ name }).select().single(), 'Create trip');
+  if (error || !data) return;
   const names = people.map((s) => s.trim()).filter(Boolean);
   if (names.length) {
-    await db.from('players').insert(names.map((nm) => ({ trip_id: data.id, name: nm })));
+    await dbw(() => db.from('players').insert(names.map((nm) => ({ trip_id: data.id, name: nm }))), 'Add people');
   }
   state.tripId = data.id;
   history.replaceState(null, '', location.pathname + '?t=' + data.id);
@@ -499,66 +588,100 @@ async function createTrip(name, people = []) {
   subscribeRealtime(data.id);
 }
 async function addPlayer(name) {
-  await db.from('players').insert({ trip_id: state.tripId, name });
+  await dbw(() => db.from('players').insert({ trip_id: state.tripId, name }), 'Add player');
   scheduleRefetch(); // instant feedback for this client; realtime updates the others
 }
 async function removePlayer(id) {
-  await db.from('players').delete().eq('id', id);
+  await dbw(() => db.from('players').delete().eq('id', id), 'Remove player');
   scheduleRefetch();
 }
 // Insert a player and return the created row (used for inline add in the game modal).
 async function addPlayerReturning(name) {
-  const { data, error } = await db.from('players')
-    .insert({ trip_id: state.tripId, name }).select().single();
+  const { data, error } = await dbw(() => db.from('players')
+    .insert({ trip_id: state.tripId, name }).select().single(), 'Add player');
   scheduleRefetch();
   return error ? null : data;
 }
 async function saveGame({ id, name, buyin, played_at, lines }) {
   if (id) {
-    await db.from('games').update({ name, buyin, played_at }).eq('id', id);
-    await db.from('game_lines').delete().eq('game_id', id);
-    await db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: id })));
+    await dbw(() => db.from('games').update({ name, buyin, played_at }).eq('id', id), 'Save game');
+    await dbw(() => db.from('game_lines').delete().eq('game_id', id), 'Save game');
+    await dbw(() => db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: id }))), 'Save game');
   } else {
-    const { data, error } = await db.from('games')
-      .insert({ trip_id: state.tripId, name, buyin, played_at }).select().single();
-    if (error) { toast('Could not save game'); return; }
-    await db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: data.id })));
+    const { data, error } = await dbw(() => db.from('games')
+      .insert({ trip_id: state.tripId, name, buyin, played_at }).select().single(), 'Save game');
+    if (error || !data) return;
+    await dbw(() => db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: data.id }))), 'Save game');
   }
   await rememberGameName(name); // custom names are retained for future games/trips
   scheduleRefetch();
 }
 async function deleteGame(id) {
-  await db.from('games').delete().eq('id', id);
+  await dbw(() => db.from('games').delete().eq('id', id), 'Delete game');
   scheduleRefetch();
 }
 // Permanently delete a trip for everyone (players/games/lines cascade in the DB).
 async function deleteTrip(id) {
-  await db.from('trips').delete().eq('id', id);
-  forgetTrip(id);
+  const { error } = await dbw(() => db.from('trips').delete().eq('id', id), 'Delete trip');
+  if (!error) forgetTrip(id);
 }
 // Adjustments: { kind: 'cash'|'expense', note, amount, lines: [{player_id, delta}] }
 async function saveAdjustment({ id, kind, note, amount, lines }) {
-  if (id) await db.from('adjustments').update({ kind, note, amount, lines }).eq('id', id);
-  else await db.from('adjustments').insert({ trip_id: state.tripId, kind, note, amount, lines });
+  if (id) await dbw(() => db.from('adjustments').update({ kind, note, amount, lines }).eq('id', id), 'Save entry');
+  else await dbw(() => db.from('adjustments').insert({ trip_id: state.tripId, kind, note, amount, lines }), 'Save entry');
   scheduleRefetch();
 }
 async function deleteAdjustment(id) {
-  await db.from('adjustments').delete().eq('id', id);
+  await dbw(() => db.from('adjustments').delete().eq('id', id), 'Delete entry');
   scheduleRefetch();
 }
 
 // ---------- render ----------
 const root = () => document.getElementById('root');
+let pendingRender = false;
 function render() {
   const r = root();
-  r.innerHTML = '';
-  if (state.loading) { r.append(el('div', { class: 'empty', text: 'Loading…' })); return; }
-  if (!state.tripId || !state.trip) {
-    r.append(state.homeView === 'history' ? renderHistory() : renderLanding());
+  // Never clobber in-progress typing: if the user is mid-entry in a main-screen
+  // field, defer this render until they leave the field (modals live outside
+  // #root and are unaffected either way).
+  const ae = document.activeElement;
+  if (ae && r.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.value) {
+    pendingRender = true;
     return;
   }
-  r.append(renderHeader(), renderTabs(), renderBody());
+  try {
+    r.innerHTML = '';
+    if (state.loading) { r.append(el('div', { class: 'empty', text: 'Loading…' })); return; }
+    if (state.tripId && !state.trip && !state.connOk) {
+      // Trip is unreachable (offline), not deleted — hold here and let the
+      // retry loop bring it back rather than dropping to the landing page.
+      r.append(el('div', { class: 'empty' }, [
+        el('div', { class: 'big', text: '📡' }),
+        el('div', { text: 'Reconnecting to your trip…' }),
+        el('div', { class: 'muted', style: 'margin-top:6px', text: 'Your data is safe — this retries automatically.' }),
+      ]));
+      return;
+    }
+    if (!state.tripId || !state.trip) {
+      r.append(state.homeView === 'history' ? renderHistory() : renderLanding());
+      return;
+    }
+    r.append(renderHeader(), renderTabs(), renderBody());
+  } catch (err) {
+    // Crash containment: never leave a blank screen.
+    console.error('render failed', err);
+    r.innerHTML = '';
+    r.append(el('div', { class: 'empty' }, [
+      el('div', { class: 'big', text: '🐻' }),
+      el('div', { text: 'Something went wrong.' }),
+      el('button', { class: 'btn', style: 'margin-top:12px', text: 'Reload', onclick: () => location.reload() }),
+    ]));
+  }
 }
+// Flush a deferred render once the user leaves the field they were typing in.
+document.addEventListener('focusout', () => {
+  if (pendingRender) { pendingRender = false; setTimeout(render, 60); }
+});
 
 function renderLanding() {
   let name = '';
@@ -1500,6 +1623,38 @@ render();
 loadCustomGames();
 loadAll();
 if (state.tripId) subscribeRealtime(state.tripId);
+
+// ---------- self-heal watchdog ----------
+// Coming back online or returning to the tab always re-syncs; a slow heartbeat
+// (visible tab only) catches anything realtime missed. Data volume is tiny, so
+// a periodic refetch is cheap insurance.
+window.addEventListener('online', () => {
+  if (state.tripId) { scheduleRefetch(); subscribeRealtime(state.tripId); }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (needsRefetch || state.tripId)) {
+    needsRefetch = false;
+    scheduleRefetch();
+  }
+});
+setInterval(() => {
+  if (document.visibilityState === 'visible' && state.tripId) scheduleRefetch();
+}, 45000);
+// Unhandled async failures degrade to "reconnecting" + refetch, never a dead UI.
+window.addEventListener('unhandledrejection', (e) => {
+  console.warn('unhandled rejection', e.reason);
+  setConn(false);
+  if (state.tripId) scheduleRefetch();
+});
+
+// Offline shell + faster repeat loads. Skipped on localhost so tests and dev
+// never fight a cached copy.
+if ('serviceWorker' in navigator && !/^(localhost|127\.)/.test(location.hostname)) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+}
+
+// Ops/debug handle (also used by the test suite).
+window.__ledgerDebug = { state, render, loadAll, setConn, scheduleRefetch };
 </script>
 </body>
 </html>

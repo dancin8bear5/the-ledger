@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0B162A"/>
+  <rect x="24" y="24" width="464" height="464" rx="80" fill="none" stroke="#C83803" stroke-width="20"/>
+  <text x="256" y="330" font-family="Arial, Helvetica, sans-serif" font-size="240" font-weight="900"
+        text-anchor="middle" fill="#C83803">TL</text>
+  <rect x="128" y="392" width="256" height="18" rx="9" fill="#FFFFFF" opacity="0.85"/>
+</svg>

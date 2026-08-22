@@ -1,0 +1,13 @@
+{
+  "name": "The Ledger",
+  "short_name": "Ledger",
+  "description": "Track game money all weekend, then settle up in the fewest payments.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#0B162A",
+  "theme_color": "#0B162A",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
