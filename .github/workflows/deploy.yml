@@ -41,12 +41,12 @@ jobs:
           sed -i "0,/<head>/s//<head><meta name=\"build\" content=\"${GITHUB_SHA}\">/" "$RUNNER_TEMP/_site/index.html"
           grep -q "content=\"${GITHUB_SHA}\"" "$RUNNER_TEMP/_site/index.html"
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         with:
           path: ${{ runner.temp }}/_site
 
   deploy:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [build]
     runs-on: ubuntu-latest
     permissions:
@@ -60,7 +60,7 @@ jobs:
         uses: actions/deploy-pages@v4
 
   probe:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [deploy]
     runs-on: ubuntu-latest
     permissions:
@@ -85,7 +85,7 @@ jobs:
 
   rollback:
     # Build failures never reach deploy, so nothing to roll back; deploy or probe failure does.
-    if: failure() && needs.deploy.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: failure() && needs.deploy.result != 'skipped' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [deploy, probe]
     runs-on: ubuntu-latest
     permissions:
@@ -149,20 +149,3 @@ jobs:
           IFS=$'\t' read -r status summary < "$RUNNER_TEMP/verdict"
           bash .github/estate-report.sh run "$status" "[$GITHUB_EVENT_NAME $GITHUB_REF_NAME] $summary" "$NEEDS"
 
-  claude-fix:
-    # Main-branch failures only. claude-code-action can't run on a `push` event
-    # ("Unsupported event type: push"), so this job hands off to claude-fix.yml via
-    # workflow_dispatch, which it supports. GITHUB_TOKEN may trigger workflow_dispatch.
-    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: [report]
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Hand off to Claude (claude-fix.yml)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run claude-fix.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f run_id="$GITHUB_RUN_ID" -f sha="$GITHUB_SHA" -f workflow="$GITHUB_WORKFLOW"
-          echo "::notice::Claude fix dispatched for run $GITHUB_RUN_ID"
