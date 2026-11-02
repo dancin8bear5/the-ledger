@@ -57,8 +57,10 @@
   }
   nav.tabs button {
     flex: 1; background: transparent; color: var(--subtext); border: none;
-    padding: 12px 4px; font-weight: 700; font-size: 14px; border-bottom: 2px solid transparent;
+    padding: 8px 2px; font-weight: 700; font-size: 13px; border-bottom: 2px solid transparent;
+    display: flex; flex-direction: column; align-items: center; gap: 2px; white-space: nowrap;
   }
+  nav.tabs button .ti { font-size: 18px; line-height: 1; }
   nav.tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
 
   /* Cards / lists */
@@ -399,7 +401,8 @@ let state = {
   trip: null,
   players: [],
   games: [],   // each: {..., lines: [{player_id, contribution, payout}]}
-  tab: 'games',
+  tab: 'games',          // 'games' | 'expenses' | 'settle' | 'players'
+  settleScope: 'all',    // Settle Up view: 'all' | 'games' | 'expenses'
   loading: true,
   customGames: [],       // saved custom game names (global)
   homeView: 'home',      // 'home' | 'history' when no trip is open
@@ -573,17 +576,25 @@ const gameOpen = (g) => gamePaid(g) === 0;
 
 // derive: flat lines with player names, for the engine (settled games only,
 // plus adjustment deltas — cash handoffs and shared expenses)
-function tripLines() {
+// Which entries belong to a settlement view: 'all' | 'games' | 'expenses'.
+// Cash payments carry their own scope (null = counts only toward All).
+function adjInScope(a, scope) {
+  if (scope === 'all') return true;
+  if (a.kind === 'expense') return scope === 'expenses';
+  return a.scope === scope;
+}
+function tripLines(scope = 'all') {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const out = [];
   for (const g of state.games) {
-    if (gameOpen(g)) continue; // in-progress games don't affect balances yet
+    if (scope === 'expenses' || gameOpen(g)) continue; // in-progress games don't affect balances yet
     for (const l of g.lines) {
       const name = nameById[l.player_id];
       if (name) out.push({ name, contribution: l.contribution, payout: l.payout });
     }
   }
   for (const a of state.adjustments) {
+    if (!adjInScope(a, scope)) continue;
     for (const l of (a.lines || [])) {
       const name = nameById[l.player_id];
       if (!name || !l.delta) continue;
@@ -593,7 +604,7 @@ function tripLines() {
   }
   return out;
 }
-function balances() { return netBalances(tripLines()); }
+function balances(scope = 'all') { return netBalances(tripLines(scope)); }
 
 // ---------- actions ----------
 async function createTrip(name, people = []) {
@@ -668,8 +679,8 @@ async function deleteTrip(id) {
   if (!error) forgetTrip(id);
 }
 // Adjustments: { kind: 'cash'|'expense', note, amount, lines: [{player_id, delta}] }
-async function saveAdjustment({ id, kind, note, amount, lines }) {
-  const fields = { kind, note, amount, lines };
+async function saveAdjustment({ id, kind, note, amount, lines, scope }) {
+  const fields = { kind, note, amount, lines, scope: kind === 'cash' ? (scope || null) : null };
   if (id) {
     const a = state.adjustments.find((x) => x.id === id);
     if (a) { Object.assign(a, fields); render(); } // show the edit now, not after the refetch
@@ -742,7 +753,7 @@ function renderLanding() {
   card.append(el('div', { class: 'empty', style: 'padding:24px 20px 8px', html: '<div class="big">🐻🏈</div>' }));
   card.append(el('h1', { text: 'The Ledger', style: 'text-align:center;margin:0 0 2px;letter-spacing:1px;text-transform:uppercase' }));
   card.append(el('p', { style: 'text-align:center;margin:0 0 4px;color:var(--accent);font-weight:800;letter-spacing:2px;text-transform:uppercase;font-size:12px', text: 'Bear Down' }));
-  card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
+  card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track poker & game money and shared groceries all weekend, then settle up in the fewest payments.' }));
 
   const submit = () => { if (!state.draftName.trim()) { toast('Name your trip'); return; } createTrip(state.draftName.trim(), state.draftPeople); };
   const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', autofocus: 'true', value: state.draftName,
@@ -1003,8 +1014,9 @@ function renderHeader() {
       el('h1', { text: '🐻 ' + state.trip.name }),
       el('div', { class: 'sub', text: 'Code ' + (state.trip.code || '—') + ' · ' + state.players.length + ' players' }),
     ]),
-    el('button', { class: 'btn small', title: 'Add game', text: '＋',
-      style: 'font-size:16px;font-weight:800;padding:7px 13px', onclick: () => openGameModal(null) }),
+    el('button', { class: 'btn small', title: state.tab === 'expenses' ? 'Add expense' : 'Add game', text: '＋',
+      style: 'font-size:16px;font-weight:800;padding:7px 13px',
+      onclick: () => (state.tab === 'expenses' ? openAdjGuarded(null, 'expense') : openGameModal(null)) }),
     el('button', { class: 'btn small', text: 'Share', onclick: async () => {
       try {
         if (navigator.share) await navigator.share({ title: 'The Ledger — ' + state.trip.name, url: shareUrl });
@@ -1026,9 +1038,9 @@ function renderHeader() {
 
 function renderTabs() {
   const tabs = el('nav', { class: 'tabs' });
-  for (const [key, label] of [['players', 'Players'], ['games', 'Games'], ['tally', 'Tally'], ['settle', 'Settle Up']]) {
-    tabs.append(el('button', { class: state.tab === key ? 'active' : '', text: label,
-      onclick: () => { state.tab = key; render(); } }));
+  for (const [key, icon, label] of [['games', '🎲', 'Games'], ['expenses', '🧾', 'Expenses'], ['settle', '💰', 'Settle Up'], ['players', '👥', 'Players']]) {
+    tabs.append(el('button', { class: state.tab === key ? 'active' : '', 'aria-label': label,
+      onclick: () => { state.tab = key; render(); } }, [el('span', { class: 'ti', text: icon }), el('span', { text: label })]));
   }
   return tabs;
 }
@@ -1037,8 +1049,8 @@ function renderBody() {
   const wrap = el('div', { class: 'wrap' });
   if (state.tab === 'players') wrap.append(renderPlayers());
   else if (state.tab === 'games') wrap.append(renderGames());
-  else if (state.tab === 'tally') wrap.append(renderTally());
-  else if (state.tab === 'settle') wrap.append(renderSettle());
+  else if (state.tab === 'expenses') wrap.append(renderExpenses());
+  else wrap.append(renderSettle());
   return wrap;
 }
 
@@ -1064,71 +1076,78 @@ function renderPlayers() {
   return box;
 }
 
+function noPlayersEmpty(box, icon) {
+  box.append(el('div', { class: 'empty' }, [
+    el('div', { class: 'big', text: icon }),
+    el('div', { text: 'No players yet.' }),
+    el('div', { class: 'muted', style: 'margin-top:4px', text: 'Add them on the Players tab, or tap ＋ above — you can add people on the spot too.' }),
+    el('button', { class: 'btn ghost small', style: 'margin-top:10px', text: 'Go to Players', onclick: () => { state.tab = 'players'; render(); } }),
+  ]));
+}
+const portalHead = (title, sub) => el('div', { style: 'margin:14px 0 2px' }, [
+  el('div', { style: 'font-weight:800;font-size:18px', text: title }),
+  el('div', { class: 'muted', style: 'font-size:13px', text: sub }),
+]);
+// Compact ranked list of nets (used by the Games standings and Expenses summary).
+function netRows(rows) {
+  const card = el('div', { class: 'card', style: 'padding:6px 12px' });
+  for (const r of rows) {
+    card.append(el('div', { class: 'inline netrow', style: 'justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.06)' }, [
+      el('div', {}, [el('div', { class: 'title', text: r.name }), r.sub ? el('div', { class: 'muted', style: 'font-size:12px', text: r.sub }) : null]),
+      el('div', { class: r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : 'zero', text: signed(r.net) }),
+    ]));
+  }
+  return card;
+}
+
+// ---------- 🎲 Games portal (cash & poker) ----------
 function renderGames() {
   const box = el('div', {});
-  if (!state.players.length) {
-    box.append(el('div', { class: 'empty' }, [
-      el('div', { class: 'big', text: '🏈' }),
-      el('div', { text: 'No players yet.' }),
-      el('div', { class: 'muted', style: 'margin-top:4px', text: 'Add them on the Players tab, or tap ＋ above — the game screen lets you add players on the spot too.' }),
-      el('button', { class: 'btn ghost small', style: 'margin-top:10px', text: 'Go to Players', onclick: () => { state.tab = 'players'; render(); } }),
-    ]));
-    return box;
-  }
-
-  const openAdj = (kind) => {
-    if (!state.adjustmentsAvailable) { toast('Needs the database update — see README (0002_adjustments.sql)'); return; }
-    openAdjModal(null, kind);
-  };
-  box.append(el('div', { class: 'inline', style: 'margin-top:12px;gap:8px' }, [
-    el('button', { class: 'btn ghost', style: 'flex:1', text: '🧾 Shared expense', title: 'Groceries, gas, food — split among the group', onclick: () => openAdj('expense') }),
-    el('button', { class: 'btn ghost', style: 'flex:1', text: '💵 Cash handoff', title: 'Someone paid someone directly', onclick: () => openAdj('cash') }),
-  ]));
-  box.append(el('div', { class: 'muted', style: 'margin-top:6px;text-align:center;font-size:12px', text: 'Groceries, gas, dinner, the house — anything someone fronted for the group.' }));
-
-  if (!state.games.length && !state.adjustments.length) {
-    box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games or expenses yet.<br>Tap ＋ in the top bar to log a game, or 🧾 above for groceries &amp; other costs.' }));
-  }
+  box.append(portalHead('🎲 Games', 'Poker, cash games and everything played for money.'));
+  if (!state.players.length) { noPlayersEmpty(box, '🎲'); return box; }
+  box.append(el('button', { class: 'btn block', style: 'margin-top:10px', text: '＋ New game', onclick: () => openGameModal(null) }));
 
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
-
-  // Games and adjustments interleaved chronologically, newest first.
-  const items = [
-    ...state.games.map((g) => ({ when: g.played_at, game: g })),
-    ...state.adjustments.map((a) => ({ when: a.created_at, adj: a })),
-  ].sort((x, y) => (x.when < y.when ? 1 : -1));
-
-  for (const item of items) {
-    if (item.game) {
-      const g = item.game;
-      const pot = g.lines.reduce((s, l) => s + l.contribution, 0);
-      const paid = g.lines.reduce((s, l) => s + l.payout, 0);
-      const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
-        .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
-      const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
-      if (g.mode === 'chips') meta.push('🪙 cash game');
-      const rb = g.lines.reduce((s, l) => s + (l.rebuys || 0), 0);
-      if (rb) meta.push('🔁 ' + rb + ' rebuy' + (rb === 1 ? '' : 's'));
-      if (paid === 0) meta.push('⏳ in progress');
-      else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
-      if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
-      box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
-        el('div', { class: 'grow' }, [
-          el('div', { class: 'title', text: g.name }),
-          el('div', { class: 'muted', text: meta.join('  ·  ') }),
-        ]),
-        el('div', { class: 'money', text: money(pot) }),
-      ]));
-    } else {
-      const a = item.adj;
-      box.append(el('div', { class: 'row-item', onclick: () => openAdjModal(a) }, [
-        el('div', { class: 'grow' }, [
-          el('div', { class: 'title', text: (a.kind === 'expense' ? '🧾 ' : '💵 ') + adjSummary(a, nameById) }),
-          el('div', { class: 'muted', text: fmtTime(a.created_at) + (a.note ? '  ·  ' + a.note : '') }),
-        ]),
-        el('div', { class: 'money', text: money(a.amount || 0) }),
-      ]));
+  const finished = state.games.filter((g) => !gameOpen(g));
+  const openN = state.games.length - finished.length;
+  if (finished.length) {
+    const b = balances('games');
+    const wins = {}, played = {};
+    for (const g of finished) for (const l of g.lines) {
+      played[l.player_id] = (played[l.player_id] || 0) + 1;
+      if (l.payout > l.contribution) wins[l.player_id] = (wins[l.player_id] || 0) + 1;
     }
+    const rows = state.players.filter((p) => played[p.id]).map((p) => ({
+      name: p.name, net: b[p.name] ?? 0, sub: (wins[p.id] || 0) + ' won of ' + played[p.id] + ' played' }))
+      .sort((x, y) => (y.net - x.net) || (x.name < y.name ? -1 : 1));
+    box.append(el('div', { class: 'section-h', text: 'Standings — games only' }), netRows(rows));
+  }
+  if (openN) box.append(el('div', { class: 'muted', style: 'margin-top:8px', text: '⏳ ' + openN + ' game' + (openN === 1 ? '' : 's') + ' in progress — tap to add rebuys or enter the result.' }));
+
+  if (!state.games.length) {
+    box.append(el('div', { class: 'empty', html: '<div class="big">🃏</div>No games yet.<br>Tap ＋ New game to start one.' }));
+    return box;
+  }
+  box.append(el('div', { class: 'section-h', text: 'All games' }));
+  for (const g of state.games) {
+    const pot = g.lines.reduce((s, l) => s + l.contribution, 0);
+    const paid = g.lines.reduce((s, l) => s + l.payout, 0);
+    const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
+      .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
+    const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
+    if (g.mode === 'chips') meta.push('🪙 cash game');
+    const rb = g.lines.reduce((s, l) => s + (l.rebuys || 0), 0);
+    if (rb) meta.push('🔁 ' + rb + ' rebuy' + (rb === 1 ? '' : 's'));
+    if (paid === 0) meta.push('⏳ in progress');
+    else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
+    if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
+    box.append(el('div', { class: 'row-item', onclick: () => openGameModal(g) }, [
+      el('div', { class: 'grow' }, [
+        el('div', { class: 'title', text: g.name }),
+        el('div', { class: 'muted', text: meta.join('  ·  ') }),
+      ]),
+      el('div', { class: 'money', text: money(pot) }),
+    ]));
   }
   return box;
 }
@@ -1144,55 +1163,146 @@ function adjSummary(a, nameById) {
   const owers = lines.filter((l) => l.delta < 0).length;
   return (nameById[payer?.player_id] || '?') + ' fronted · split ÷ ' + (owers + 1);
 }
+const SCOPE_LABEL = { all: 'All', games: '🎲 Games', expenses: '🧾 Expenses' };
 
-function renderTally() {
+function openAdjGuarded(adj, kind, opts) {
+  if (!state.adjustmentsAvailable) { toast('Needs the database update — see README (0002_adjustments.sql)'); return; }
+  openAdjModal(adj, kind, opts);
+}
+
+// ---------- 🧾 Expenses portal (groceries, food, shared costs) ----------
+function renderExpenses() {
   const box = el('div', {});
-  if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players to see the tally.' })); return box; }
-  const b = balances();
-  const rows = state.players.map((p) => ({ name: p.name, net: b[p.name] ?? 0 }))
-    .sort((x, y) => (y.net - x.net) || (x.name < y.name ? -1 : 1));
-  for (const r of rows) {
-    const cls = r.net > 0 ? 'pos' : r.net < 0 ? 'neg' : 'zero';
-    box.append(el('div', { class: 'row-item' }, [
-      el('div', { class: 'grow title', text: r.name }),
-      el('div', { class: cls, text: signed(r.net) }),
+  box.append(portalHead('🧾 Expenses', 'Groceries, food, gas, the house — anything someone fronted for the group.'));
+  if (!state.players.length) { noPlayersEmpty(box, '🛒'); return box; }
+  box.append(el('button', { class: 'btn block', style: 'margin-top:10px', text: '＋ Add expense', onclick: () => openAdjGuarded(null, 'expense') }));
+
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  const exps = state.adjustments.filter((a) => a.kind === 'expense');
+  if (!exps.length) {
+    box.append(el('div', { class: 'empty', html: '<div class="big">🛒</div>No expenses yet.<br>Tap ＋ Add expense after a grocery run or dinner.' }));
+    return box;
+  }
+  const total = exps.reduce((s, a) => s + (a.amount || 0), 0);
+  const fronted = {}, net = {};
+  for (const a of exps) for (const l of (a.lines || [])) {
+    net[l.player_id] = (net[l.player_id] || 0) + l.delta;
+    if (l.delta > 0) fronted[l.player_id] = (fronted[l.player_id] || 0) + (a.amount || 0);
+  }
+  box.append(el('div', { class: 'card', style: 'margin-top:12px;text-align:center' }, [
+    el('div', { class: 'muted', text: 'Trip spending' }),
+    el('div', { style: 'font-size:26px;font-weight:800', class: 'exptotal', text: money(total) }),
+    el('div', { class: 'muted', style: 'font-size:12px', text: exps.length + ' expense' + (exps.length === 1 ? '' : 's') }),
+  ]));
+  const rows = state.players.filter((p) => fronted[p.id] || net[p.id]).map((p) => {
+    const f = fronted[p.id] || 0, n = net[p.id] || 0;
+    return { name: p.name, net: n, sub: 'fronted ' + money(f) + ' · share ' + money(f - n) };
+  }).sort((x, y) => (y.net - x.net) || (x.name < y.name ? -1 : 1));
+  box.append(el('div', { class: 'section-h', text: 'Who\'s owed — expenses only' }), netRows(rows));
+
+  box.append(el('div', { class: 'section-h', text: 'All expenses' }));
+  for (const a of [...exps].sort((x, y) => (x.created_at < y.created_at ? 1 : -1))) {
+    box.append(el('div', { class: 'row-item', onclick: () => openAdjGuarded(a) }, [
+      el('div', { class: 'grow' }, [
+        el('div', { class: 'title', text: '🧾 ' + (a.note || 'Expense') }),
+        el('div', { class: 'muted', text: adjSummary(a, nameById) + '  ·  ' + fmtTime(a.created_at) }),
+      ]),
+      el('div', { class: 'money', text: money(a.amount || 0) }),
     ]));
   }
-  box.append(el('div', { class: 'muted', style: 'margin-top:12px;text-align:center', text: 'Positive = they are owed.  Negative = they owe.' }));
   return box;
 }
 
+// ---------- 💰 Settle Up (All / Games / Expenses) ----------
 function renderSettle() {
   const box = el('div', {});
-  const openCount = state.games.filter(gameOpen).length;
-  const noteOpen = () => { if (openCount) box.append(el('div', { class: 'card', style: 'border-color:var(--gold)' }, [
+  const scope = state.settleScope;
+  box.append(portalHead('💰 Settle Up', 'Settle everything at once, or games and expenses separately.'));
+  const seg = el('div', { class: 'inline', style: 'margin-top:10px;gap:6px' });
+  for (const k of ['all', 'games', 'expenses']) {
+    seg.append(el('button', { class: 'btn small scopebtn ' + (scope === k ? '' : 'ghost'), style: 'flex:1', text: SCOPE_LABEL[k],
+      onclick: () => { state.settleScope = k; render(); } }));
+  }
+  box.append(seg);
+  if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players first.' })); return box; }
+
+  const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
+  const idByName = Object.fromEntries(state.players.map((p) => [p.name, p.id]));
+  const openCount = scope === 'expenses' ? 0 : state.games.filter(gameOpen).length;
+  if (openCount) box.append(el('div', { class: 'card', style: 'border-color:var(--gold)' }, [
     el('div', { class: 'muted', text: '⏳ ' + openCount + ' game' + (openCount === 1 ? '' : 's') + ' in progress — not counted until the result is entered.' }),
-  ])); };
-  if (!state.games.length && !state.adjustments.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
-  const b = balances();
-  const payments = minimize(b);
-  const res = residual(b);
-  if (!payments.length) {
-    noteOpen();
-    box.append(el('div', { class: 'empty', html: '<div class="big">✅</div><b>All square</b><br>Everyone is even — no payments needed.' }));
-    appendStatementsAndExport(box, b, payments);
+  ]));
+  const cashHere = state.adjustments.filter((a) => a.kind === 'cash' && adjInScope(a, scope));
+  if (scope !== 'all' && state.adjustments.some((a) => a.kind === 'cash' && !a.scope)) {
+    box.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'Payments recorded under "All" only count in the All view.' }));
+  }
+
+  const b = balances(scope);
+  const anything = (scope !== 'expenses' && state.games.some((g) => !gameOpen(g)))
+    || state.adjustments.some((a) => adjInScope(a, scope));
+  if (!anything) {
+    box.append(el('div', { class: 'empty', text: scope === 'expenses' ? 'No expenses yet — nothing to settle.' : scope === 'games' ? 'No finished games yet — nothing to settle.' : 'Nothing to settle yet.' }));
+    box.append(recordPaymentBtn(scope));
     return box;
   }
-  noteOpen();
+
+  // Balances, with the per-section breakdown in the All view.
+  const parts = scope === 'all' ? { g: balances('games'), e: balances('expenses') } : null;
+  const rows = state.players.map((p) => {
+    let sub = null;
+    if (parts) {
+      const g = parts.g[p.name] ?? 0, e = parts.e[p.name] ?? 0, c = (b[p.name] ?? 0) - g - e;
+      sub = ['🎲 ' + signed(g), '🧾 ' + signed(e)].concat(c ? ['💵 ' + signed(c)] : []).join('  ·  ');
+    }
+    return { name: p.name, net: b[p.name] ?? 0, sub };
+  }).sort((x, y) => (y.net - x.net) || (x.name < y.name ? -1 : 1));
+  box.append(el('div', { class: 'section-h', text: 'Balances — ' + SCOPE_LABEL[scope] }), netRows(rows));
+  box.append(el('div', { class: 'muted', style: 'margin-top:6px;text-align:center;font-size:12px', text: 'Positive = they are owed.  Negative = they owe.' }));
+
+  const payments = minimize(b);
+  const res = residual(b);
   if (res !== 0) {
     box.append(el('div', { class: 'card', style: 'border-color:var(--accent)' }, [
       el('div', { class: 'neg', text: '⚠︎ A game pot is unbalanced (off by ' + money(Math.abs(res)) + '). Fix it in Games for an exact settlement.' }),
     ]));
   }
-  box.append(el('div', { class: 'muted', style: 'margin-top:12px', text: payments.length + ' payment' + (payments.length === 1 ? '' : 's') + ' to settle everyone:' }));
-  for (const p of payments) {
-    box.append(el('div', { class: 'row-item' }, [
-      el('div', { class: 'grow', html: '<b>' + escapeHtml(p.from) + '</b> &rarr; <b>' + escapeHtml(p.to) + '</b>' }),
-      el('div', { class: 'money', text: money(p.amount) }),
-    ]));
+  if (!payments.length) {
+    box.append(el('div', { class: 'empty', html: '<div class="big">✅</div><b>All square</b><br>No payments needed.' }));
+  } else {
+    box.append(el('div', { class: 'section-h', text: payments.length + ' payment' + (payments.length === 1 ? '' : 's') + ' to settle' }));
+    for (const p of payments) {
+      box.append(el('div', { class: 'row-item payrow' }, [
+        el('div', { class: 'grow', html: '<b>' + escapeHtml(p.from) + '</b> &rarr; <b>' + escapeHtml(p.to) + '</b>' }),
+        el('div', { class: 'money', text: money(p.amount) }),
+        el('button', { class: 'btn ghost small paidbtn', style: 'margin-left:8px', text: '✓ Paid', onclick: () => {
+          if (!confirm('Record that ' + p.from + ' paid ' + p.to + ' ' + money(p.amount) + '?')) return;
+          saveAdjustment({ id: null, kind: 'cash', note: 'Settle up', amount: p.amount, scope: scope === 'all' ? null : scope,
+            lines: [{ player_id: idByName[p.from], delta: p.amount }, { player_id: idByName[p.to], delta: -p.amount }] });
+          toast('Recorded ' + p.from + ' → ' + p.to + ' ' + money(p.amount));
+        } }),
+      ]));
+    }
   }
-  appendStatementsAndExport(box, b, payments);
+  box.append(recordPaymentBtn(scope));
+
+  if (cashHere.length) {
+    box.append(el('div', { class: 'section-h', text: 'Payments recorded' }));
+    for (const a of [...cashHere].sort((x, y) => (x.created_at < y.created_at ? 1 : -1))) {
+      box.append(el('div', { class: 'row-item', onclick: () => openAdjGuarded(a) }, [
+        el('div', { class: 'grow' }, [
+          el('div', { class: 'title', text: '💵 ' + adjSummary(a, nameById) }),
+          el('div', { class: 'muted', text: fmtTime(a.created_at) + '  ·  ' + SCOPE_LABEL[a.scope || 'all'] + (a.note ? '  ·  ' + a.note : '') }),
+        ]),
+        el('div', { class: 'money', text: money(a.amount || 0) }),
+      ]));
+    }
+  }
+  appendStatementsAndExport(box, b, payments, scope);
   return box;
+}
+function recordPaymentBtn(scope) {
+  return el('button', { class: 'btn ghost block', style: 'margin-top:12px', text: '💵 Record a cash payment',
+    onclick: () => openAdjGuarded(null, 'cash', { scope: scope === 'all' ? null : scope }) });
 }
 
 // ---------- statements + export ----------
@@ -1206,24 +1316,25 @@ async function copyText(text, doneMsg) {
 }
 
 function settlementText(payments) {
-  const head = '🐻 The Ledger — ' + state.trip.name + '\n';
+  const head = '🐻 The Ledger — ' + state.trip.name + (state.settleScope !== 'all' ? ' (' + SCOPE_LABEL[state.settleScope].replace(/^\S+ /, '') + ')' : '') + '\n';
   if (!payments.length) return head + 'All square — no payments needed.';
   return head + 'Settle up (' + payments.length + ' payment' + (payments.length === 1 ? '' : 's') + '):\n' +
     payments.map((p) => p.from + ' → ' + p.to + ': ' + money(p.amount)).join('\n');
 }
 
 // Per-player statement: every finished game they played, adjustments, total, settlement role.
-function playerStatement(name, bals, payments) {
+function playerStatement(name, bals, payments, scope = 'all') {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const rows = [];
   const chronGames = [...state.games].sort((a, b) => (a.played_at < b.played_at ? -1 : 1));
-  for (const g of chronGames) {
+  for (const g of scope === 'expenses' ? [] : chronGames) {
     const line = g.lines.find((l) => nameById[l.player_id] === name);
     if (!line) continue;
     if (gameOpen(g)) rows.push({ label: g.name + ' (' + fmtTime(g.played_at) + ')', text: 'in progress' });
     else rows.push({ label: g.name + ' (' + fmtTime(g.played_at) + ')', net: line.payout - line.contribution });
   }
   for (const a of state.adjustments) {
+    if (!adjInScope(a, scope)) continue;
     const line = (a.lines || []).find((l) => nameById[l.player_id] === name);
     if (!line || !line.delta) continue;
     rows.push({ label: (a.kind === 'expense' ? '🧾 ' : '💵 ') + adjSummary(a, nameById) + (a.note ? ' — ' + a.note : ''), net: line.delta });
@@ -1248,15 +1359,15 @@ function statementText(name, st) {
 function journalCsv() {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const esc = (v) => '"' + String(v).replaceAll('"', '""') + '"';
-  const rows = [['type', 'name', 'time', 'player', 'in', 'out', 'net', 'rebuys', 'end chips']];
+  const rows = [['section', 'type', 'name', 'time', 'player', 'in', 'out', 'net', 'rebuys', 'end chips']];
   for (const g of [...state.games].sort((a, b) => (a.played_at < b.played_at ? -1 : 1))) {
     for (const l of g.lines) {
-      rows.push(['game', g.name, g.played_at, nameById[l.player_id] || '?', l.contribution, l.payout, l.payout - l.contribution, l.rebuys || 0, l.chips ?? '']);
+      rows.push(['games', 'game', g.name, g.played_at, nameById[l.player_id] || '?', l.contribution, l.payout, l.payout - l.contribution, l.rebuys || 0, l.chips ?? '']);
     }
   }
   for (const a of state.adjustments) {
     for (const l of (a.lines || [])) {
-      rows.push([a.kind, a.note || adjSummary(a, nameById), a.created_at, nameById[l.player_id] || '?',
+      rows.push([a.kind === 'expense' ? 'expenses' : (a.scope || 'all'), a.kind, a.note || adjSummary(a, nameById), a.created_at, nameById[l.player_id] || '?',
         l.delta < 0 ? -l.delta : 0, l.delta > 0 ? l.delta : 0, l.delta, '', '']);
     }
   }
@@ -1274,7 +1385,7 @@ function downloadCsv() {
 
 const expandedStmts = new Set();
 
-function appendStatementsAndExport(box, bals, payments) {
+function appendStatementsAndExport(box, bals, payments, scope = 'all') {
   box.append(el('div', { class: 'inline', style: 'margin-top:16px' }, [
     el('button', { class: 'btn ghost small', style: 'flex:1', text: '📋 Copy settlement',
       onclick: () => copyText(settlementText(payments), 'Settlement copied') }),
@@ -1283,7 +1394,7 @@ function appendStatementsAndExport(box, bals, payments) {
 
   box.append(el('div', { class: 'section-h', style: 'margin-top:18px', text: 'Statements' }));
   for (const p of state.players) {
-    const st = playerStatement(p.name, bals, payments);
+    const st = playerStatement(p.name, bals, payments, scope);
     const open = expandedStmts.has(p.name);
     const row = el('div', { class: 'row-item', style: 'flex-wrap:wrap', onclick: () => {
       if (expandedStmts.has(p.name)) expandedStmts.delete(p.name); else expandedStmts.add(p.name);
@@ -1313,9 +1424,10 @@ function appendStatementsAndExport(box, bals, payments) {
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 // ---------- adjustment modal (cash handoff / shared expense) ----------
-function openAdjModal(adj, startKind) {
+function openAdjModal(adj, startKind, opts = {}) {
   const editing = !!adj;
-  let kind = adj ? adj.kind : (startKind || 'expense');
+  const kind = adj ? adj.kind : (startKind || 'expense');
+  let scope = adj ? (adj.scope || null) : (opts.scope || null); // cash only: which settlement it counts toward
   let amount = adj ? (adj.amount || 0) : 0;
   let note = adj ? (adj.note || '') : '';
   let payerId = null;
@@ -1371,17 +1483,18 @@ function openAdjModal(adj, startKind) {
   function build() {
     modal.append(el('div', { class: 'bar' }, [
       el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
-      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit entry' : (kind === 'expense' ? 'Shared expense' : 'Cash handoff') })]),
+      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: (editing ? 'Edit ' : '') + (kind === 'expense' ? (editing ? 'expense' : 'Shared expense') : (editing ? 'payment' : 'Cash payment')) })]),
       el('button', { class: 'btn small', text: 'Save', onclick: onSave }),
     ]));
 
-    // kind toggle
-    const seg = el('div', { class: 'inline', style: 'margin-top:12px' });
-    for (const [k, label] of [['expense', '🧾 Shared expense'], ['cash', '💵 Cash handoff']]) {
-      seg.append(el('button', { class: 'btn small ' + (kind === k ? '' : 'ghost'), style: 'flex:1',
-        text: label, onclick: () => { kind = k; rebuild(); } }));
+    if (kind === 'cash') {
+      const seg = el('div', { class: 'inline', style: 'margin-top:6px;gap:6px' });
+      for (const k of [null, 'games', 'expenses']) {
+        seg.append(el('button', { class: 'btn small ' + (scope === k ? '' : 'ghost'), style: 'flex:1',
+          text: SCOPE_LABEL[k || 'all'], onclick: () => { scope = k; rebuild(); } }));
+      }
+      modal.append(el('label', { class: 'field', text: 'Counts toward' }), seg);
     }
-    modal.append(seg);
 
     if (kind === 'expense') {
       const chips = el('div', { class: 'inline', style: 'margin-top:12px;flex-wrap:wrap;gap:6px' });
@@ -1403,7 +1516,7 @@ function openAdjModal(adj, startKind) {
     if (kind === 'cash') {
       pickList('Who paid (hands over the cash)', (id) => payerId === id, (id) => { payerId = id; if (recvId === id) recvId = null; rebuild(); });
       pickList('Who received it', (id) => recvId === id, (id) => { recvId = id; if (payerId === id) payerId = null; rebuild(); });
-      modal.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'The payer is owed this back at settlement (an early payment or a loan).' }));
+      modal.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'Money that changed hands (paying someone back, or a loan) — it moves both balances toward settled.' }));
     } else {
       pickList('Who fronted the money', (id) => payerId === id, (id) => { payerId = id; sharers.add(id); rebuild(); });
       pickList('Who splits it (tap to toggle)', (id) => sharers.has(id), (id) => {
@@ -1418,8 +1531,8 @@ function openAdjModal(adj, startKind) {
     modal.append(el('label', { class: 'field', text: 'Note (optional)' }), noteInp);
 
     if (editing) {
-      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--neg)', text: 'Delete entry',
-        onclick: () => { if (confirm('Delete this entry?')) { deleteAdjustment(adj.id); bg.remove(); } } }));
+      modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--neg)', text: kind === 'expense' ? 'Delete expense' : 'Delete payment',
+        onclick: () => { if (confirm(kind === 'expense' ? 'Delete this expense?' : 'Delete this payment?')) { deleteAdjustment(adj.id); bg.remove(); } } }));
     }
   }
 
@@ -1441,7 +1554,7 @@ function openAdjModal(adj, startKind) {
       lines = others.map((id) => ({ player_id: id, delta: -base }));
       lines.push({ player_id: payerId, delta: base * others.length });
     }
-    saveAdjustment({ id: adj ? adj.id : null, kind, note: note.trim(), amount, lines });
+    saveAdjustment({ id: adj ? adj.id : null, kind, note: note.trim(), amount, lines, scope });
     bg.remove();
   }
 
