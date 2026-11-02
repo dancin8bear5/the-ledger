@@ -223,7 +223,7 @@ function moneyControl(initial, onSet, cls, pid) {
     onSet(value);
   });
   num.addEventListener('input', () => {
-    value = Math.max(0, parseInt(num.value || '0', 10));
+    value = Math.max(0, Math.round(parseFloat(num.value) || 0));
     if (value > parseInt(range.max, 10)) range.max = String(maxFor(value));
     range.value = String(value);
     last = value;
@@ -917,14 +917,18 @@ function renderGames() {
     return box;
   }
 
-  box.append(el('button', { class: 'btn ghost block', style: 'margin-top:12px', text: '💵 Log cash handoff / shared expense',
-    onclick: () => {
-      if (!state.adjustmentsAvailable) { toast('Needs the database update — see README (0002_adjustments.sql)'); return; }
-      openAdjModal(null);
-    } }));
+  const openAdj = (kind) => {
+    if (!state.adjustmentsAvailable) { toast('Needs the database update — see README (0002_adjustments.sql)'); return; }
+    openAdjModal(null, kind);
+  };
+  box.append(el('div', { class: 'inline', style: 'margin-top:12px;gap:8px' }, [
+    el('button', { class: 'btn ghost', style: 'flex:1', text: '🧾 Shared expense', title: 'Groceries, gas, food — split among the group', onclick: () => openAdj('expense') }),
+    el('button', { class: 'btn ghost', style: 'flex:1', text: '💵 Cash handoff', title: 'Someone paid someone directly', onclick: () => openAdj('cash') }),
+  ]));
+  box.append(el('div', { class: 'muted', style: 'margin-top:6px;text-align:center;font-size:12px', text: 'Groceries, gas, dinner, the house — anything someone fronted for the group.' }));
 
   if (!state.games.length && !state.adjustments.length) {
-    box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games yet.<br>Tap ＋ in the top bar to log the first one.' }));
+    box.append(el('div', { class: 'empty', html: '<div class="big">🎲</div>No games or expenses yet.<br>Tap ＋ in the top bar to log a game, or 🧾 above for groceries &amp; other costs.' }));
   }
 
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
@@ -957,7 +961,7 @@ function renderGames() {
       const a = item.adj;
       box.append(el('div', { class: 'row-item', onclick: () => openAdjModal(a) }, [
         el('div', { class: 'grow' }, [
-          el('div', { class: 'title', text: '💵 ' + adjSummary(a, nameById) }),
+          el('div', { class: 'title', text: (a.kind === 'expense' ? '🧾 ' : '💵 ') + adjSummary(a, nameById) }),
           el('div', { class: 'muted', text: fmtTime(a.created_at) + (a.note ? '  ·  ' + a.note : '') }),
         ]),
         el('div', { class: 'money', text: money(a.amount || 0) }),
@@ -1147,9 +1151,9 @@ function appendStatementsAndExport(box, bals, payments) {
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 // ---------- adjustment modal (cash handoff / shared expense) ----------
-function openAdjModal(adj) {
+function openAdjModal(adj, startKind) {
   const editing = !!adj;
-  let kind = adj ? adj.kind : 'cash';
+  let kind = adj ? adj.kind : (startKind || 'expense');
   let amount = adj ? (adj.amount || 0) : 0;
   let note = adj ? (adj.note || '') : '';
   let payerId = null;
@@ -1178,6 +1182,19 @@ function openAdjModal(adj) {
 
   function rebuild() { modal.innerHTML = ''; build(); }
 
+  const preview = el('div', { class: 'muted', style: 'margin-top:8px' });
+  function updatePreview() {
+    if (kind !== 'expense') return;
+    const n = sharers.size;
+    const payer = state.players.find((p) => p.id === payerId);
+    if (!amount || n < 2) { preview.textContent = 'Split evenly among everyone checked; odd dollars are eaten by whoever fronted it.'; return; }
+    const each = Math.floor(amount / n);
+    const extra = amount - each * n;
+    preview.textContent = money(amount) + ' ÷ ' + n + ' = ' + money(each) + ' each'
+      + (payer ? ' — everyone else owes ' + payer.name + ' ' + money(each) : '')
+      + (extra ? ' (' + (payer ? payer.name : 'payer') + ' eats the extra ' + money(extra) + ')' : '') + '.';
+  }
+
   function pickList(title, isSel, onPick) {
     modal.append(el('div', { class: 'section-h', text: title }));
     for (const p of state.players) {
@@ -1192,22 +1209,31 @@ function openAdjModal(adj) {
   function build() {
     modal.append(el('div', { class: 'bar' }, [
       el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
-      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit entry' : 'Cash / expense' })]),
+      el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit entry' : (kind === 'expense' ? 'Shared expense' : 'Cash handoff') })]),
       el('button', { class: 'btn small', text: 'Save', onclick: onSave }),
     ]));
 
     // kind toggle
     const seg = el('div', { class: 'inline', style: 'margin-top:12px' });
-    for (const [k, label] of [['cash', '💵 Cash handoff'], ['expense', '🧾 Shared expense']]) {
+    for (const [k, label] of [['expense', '🧾 Shared expense'], ['cash', '💵 Cash handoff']]) {
       seg.append(el('button', { class: 'btn small ' + (kind === k ? '' : 'ghost'), style: 'flex:1',
         text: label, onclick: () => { kind = k; rebuild(); } }));
     }
     modal.append(seg);
 
-    const ctl = moneyControl(amount, (v) => (amount = v));
+    if (kind === 'expense') {
+      const chips = el('div', { class: 'inline', style: 'margin-top:12px;flex-wrap:wrap;gap:6px' });
+      for (const [icon, label] of [['🛒', 'Groceries'], ['⛽', 'Gas'], ['🍕', 'Food'], ['🍺', 'Drinks'], ['🏠', 'Lodging'], ['🎟', 'Tickets']]) {
+        chips.append(el('button', { class: 'btn small ' + (note === label ? '' : 'ghost'), text: icon + ' ' + label,
+          onclick: () => { note = label; rebuild(); } }));
+      }
+      modal.append(el('div', { class: 'section-h', text: 'What was it?' }), chips);
+    }
+
+    const ctl = moneyControl(amount, (v) => { amount = v; updatePreview(); });
     modal.append(el('label', { class: 'field', text: 'Amount' }),
       el('div', { class: 'inline', style: 'margin-top:6px;flex-wrap:wrap' }, [
-        el('div', { class: 'grow muted', style: 'flex:1', text: 'Slide ($5 fast, $1 slow) or type' }),
+        el('div', { class: 'grow muted', style: 'flex:1', text: 'Slide or type (cents round to the nearest $)' }),
         ctl.num,
         ctl.range,
       ]));
@@ -1222,10 +1248,11 @@ function openAdjModal(adj) {
         if (sharers.has(id) && id !== payerId) sharers.delete(id); else sharers.add(id);
         rebuild();
       });
-      modal.append(el('div', { class: 'muted', style: 'margin-top:8px', text: 'Split evenly; odd dollars are eaten by the payer.' }));
+      modal.append(preview);
+      updatePreview();
     }
 
-    const noteInp = el('input', { class: 'inp', value: note, placeholder: 'Note (e.g. pizza)', oninput: (e) => (note = e.target.value) });
+    const noteInp = el('input', { class: 'inp', value: note, placeholder: kind === 'expense' ? 'e.g. Jewel-Osco run' : 'Note (optional)', oninput: (e) => (note = e.target.value) });
     modal.append(el('label', { class: 'field', text: 'Note (optional)' }), noteInp);
 
     if (editing) {
