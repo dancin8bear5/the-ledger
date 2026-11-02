@@ -269,6 +269,10 @@ let state = {
   adjustments: [],       // this trip's cash handoffs / shared expenses
   adjustmentsAvailable: true, // false when the adjustments table doesn't exist yet
   connOk: true,          // false while reads/writes/realtime are failing (self-heal)
+  draftName: '',         // the new-trip form's in-progress name/people — kept in
+  draftPeople: [],       // persistent state (not a local var) so ANY re-render
+                         // mid-entry (self-heal, a background sync, a focus edge
+                         // case on mobile) can never wipe what's been typed.
 };
 
 // Global custom game names (retained across trips/devices).
@@ -468,6 +472,7 @@ async function createTrip(name, people = []) {
   if (names.length) {
     await dbw(() => db.from('players').insert(names.map((nm) => ({ trip_id: data.id, name: nm }))), 'Add people');
   }
+  state.draftName = ''; state.draftPeople = []; // this trip is made; the next one starts blank
   state.tripId = data.id;
   history.replaceState(null, '', location.pathname + '?t=' + data.id);
   await loadAll();
@@ -570,8 +575,9 @@ document.addEventListener('focusout', () => {
 });
 
 function renderLanding() {
-  let name = '';
-  const people = [];
+  // Draft state lives on `state`, not in local variables here, so this
+  // function can be called over and over (self-heal re-renders, a mobile
+  // focus-transition edge case, anything) without ever losing what's typed.
   const wrap = el('div', { class: 'wrap' });
   const card = el('div', { class: 'card', style: 'border-top:4px solid var(--accent)' });
   card.append(el('div', { class: 'empty', style: 'padding:24px 20px 8px', html: '<div class="big">🐻🏈</div>' }));
@@ -579,8 +585,9 @@ function renderLanding() {
   card.append(el('p', { style: 'text-align:center;margin:0 0 4px;color:var(--accent);font-weight:800;letter-spacing:2px;text-transform:uppercase;font-size:12px', text: 'Bear Down' }));
   card.append(el('p', { class: 'muted', style: 'text-align:center;margin-top:0', text: 'Track game money all weekend, then settle up in the fewest payments.' }));
 
-  const submit = () => { if (!name.trim()) { toast('Name your trip'); return; } createTrip(name.trim(), people); };
-  const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', autofocus: 'true', oninput: (e) => (name = e.target.value) });
+  const submit = () => { if (!state.draftName.trim()) { toast('Name your trip'); return; } createTrip(state.draftName.trim(), state.draftPeople); };
+  const nameInp = el('input', { class: 'inp', placeholder: 'Trip name (e.g. Lake Weekend)', autofocus: 'true', value: state.draftName,
+    oninput: (e) => (state.draftName = e.target.value) });
   nameInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
   card.append(el('label', { class: 'field', text: 'Trip name' }), nameInp);
 
@@ -589,11 +596,12 @@ function renderLanding() {
   const chips = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:6px' });
   const drawChips = () => {
     chips.innerHTML = '';
-    people.forEach((nm, i) => chips.append(el('span', { class: 'pill', style: 'cursor:pointer', text: nm + '  ✕',
-      title: 'Remove', onclick: () => { people.splice(i, 1); drawChips(); } })));
+    state.draftPeople.forEach((nm, i) => chips.append(el('span', { class: 'pill', style: 'cursor:pointer', text: nm + '  ✕',
+      title: 'Remove', onclick: () => { state.draftPeople.splice(i, 1); drawChips(); } })));
   };
+  drawChips();
   const buf = { v: '' };
-  const addPerson = () => { const nm = buf.v.trim(); if (!nm) return; if (!people.includes(nm)) people.push(nm); buf.v = ''; personInp.value = ''; drawChips(); personInp.focus(); };
+  const addPerson = () => { const nm = buf.v.trim(); if (!nm) return; if (!state.draftPeople.includes(nm)) state.draftPeople.push(nm); buf.v = ''; personInp.value = ''; drawChips(); personInp.focus(); };
   const personInp = el('input', { class: 'inp', placeholder: 'Add a name…', oninput: (e) => (buf.v = e.target.value) });
   personInp.addEventListener('keydown', (e) => { if (e.key === 'Enter') addPerson(); });
   card.append(el('div', { class: 'inline', style: 'margin-top:6px' }, [
@@ -604,7 +612,7 @@ function renderLanding() {
 
   const btn = el('button', { class: 'btn block', style: 'margin-top:18px', text: 'Create trip', onclick: submit });
   card.append(btn);
-  setTimeout(() => nameInp.focus(), 0);
+  if (!state.draftName) setTimeout(() => nameInp.focus(), 0); // don't steal focus back once typing has started
   wrap.append(card);
 
   // Past trips opened on this device.
