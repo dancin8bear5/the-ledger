@@ -658,6 +658,7 @@ async function saveGame({ id, name, buyin, played_at, lines, mode, chip_dollars,
   scheduleRefetch();
 }
 async function deleteGame(id) {
+  state.games = state.games.filter((g) => g.id !== id); render();
   await dbw(() => db.from('games').delete().eq('id', id), 'Delete game');
   scheduleRefetch();
 }
@@ -668,11 +669,19 @@ async function deleteTrip(id) {
 }
 // Adjustments: { kind: 'cash'|'expense', note, amount, lines: [{player_id, delta}] }
 async function saveAdjustment({ id, kind, note, amount, lines }) {
-  if (id) await dbw(() => db.from('adjustments').update({ kind, note, amount, lines }).eq('id', id), 'Save entry');
-  else await dbw(() => db.from('adjustments').insert({ trip_id: state.tripId, kind, note, amount, lines }), 'Save entry');
+  const fields = { kind, note, amount, lines };
+  if (id) {
+    const a = state.adjustments.find((x) => x.id === id);
+    if (a) { Object.assign(a, fields); render(); } // show the edit now, not after the refetch
+    await dbw(() => db.from('adjustments').update(fields).eq('id', id), 'Save entry');
+  } else {
+    const { data } = await dbw(() => db.from('adjustments').insert({ trip_id: state.tripId, ...fields }).select().single(), 'Save entry');
+    if (data && !state.adjustments.some((x) => x.id === data.id)) { state.adjustments.unshift(data); render(); }
+  }
   scheduleRefetch();
 }
 async function deleteAdjustment(id) {
+  state.adjustments = state.adjustments.filter((x) => x.id !== id); render();
   await dbw(() => db.from('adjustments').delete().eq('id', id), 'Delete entry');
   scheduleRefetch();
 }
@@ -1157,7 +1166,7 @@ function renderSettle() {
   const box = el('div', {});
   const openCount = state.games.filter(gameOpen).length;
   const noteOpen = () => { if (openCount) box.append(el('div', { class: 'card', style: 'border-color:var(--gold)' }, [
-    el('div', { class: 'muted', text: '⏳ ' + openCount + ' game' + (openCount === 1 ? '' : 's') + ' in progress — not counted until you set the winner.' }),
+    el('div', { class: 'muted', text: '⏳ ' + openCount + ' game' + (openCount === 1 ? '' : 's') + ' in progress — not counted until the result is entered.' }),
   ])); };
   if (!state.games.length && !state.adjustments.length) { box.append(el('div', { class: 'empty', text: 'No games yet — nothing to settle.' })); return box; }
   const b = balances();
@@ -1217,7 +1226,7 @@ function playerStatement(name, bals, payments) {
   for (const a of state.adjustments) {
     const line = (a.lines || []).find((l) => nameById[l.player_id] === name);
     if (!line || !line.delta) continue;
-    rows.push({ label: '💵 ' + adjSummary(a, nameById) + (a.note ? ' — ' + a.note : ''), net: line.delta });
+    rows.push({ label: (a.kind === 'expense' ? '🧾 ' : '💵 ') + adjSummary(a, nameById) + (a.note ? ' — ' + a.note : ''), net: line.delta });
   }
   const total = bals[name] ?? 0;
   const pays = payments.filter((p) => p.from === name);
@@ -1239,16 +1248,16 @@ function statementText(name, st) {
 function journalCsv() {
   const nameById = Object.fromEntries(state.players.map((p) => [p.id, p.name]));
   const esc = (v) => '"' + String(v).replaceAll('"', '""') + '"';
-  const rows = [['type', 'name', 'time', 'player', 'in', 'out', 'net']];
+  const rows = [['type', 'name', 'time', 'player', 'in', 'out', 'net', 'rebuys', 'end chips']];
   for (const g of [...state.games].sort((a, b) => (a.played_at < b.played_at ? -1 : 1))) {
     for (const l of g.lines) {
-      rows.push(['game', g.name, g.played_at, nameById[l.player_id] || '?', l.contribution, l.payout, l.payout - l.contribution]);
+      rows.push(['game', g.name, g.played_at, nameById[l.player_id] || '?', l.contribution, l.payout, l.payout - l.contribution, l.rebuys || 0, l.chips ?? '']);
     }
   }
   for (const a of state.adjustments) {
     for (const l of (a.lines || [])) {
       rows.push([a.kind, a.note || adjSummary(a, nameById), a.created_at, nameById[l.player_id] || '?',
-        l.delta < 0 ? -l.delta : 0, l.delta > 0 ? l.delta : 0, l.delta]);
+        l.delta < 0 ? -l.delta : 0, l.delta > 0 ? l.delta : 0, l.delta, '', '']);
     }
   }
   return rows.map((r) => r.map(esc).join(',')).join('\n');
