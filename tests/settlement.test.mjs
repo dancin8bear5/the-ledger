@@ -1,7 +1,7 @@
 // Node-runnable tests for the settlement engine. Run: node tests/settlement.test.mjs
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { netBalances, minimize, residual, pairwiseFlows, presetSplit } from '../settlement.mjs';
+import { netBalances, minimize, residual, pairwiseFlows, presetSplit, chipPayouts } from '../settlement.mjs';
 
 // Apply payments to a copy of balances and assert everyone lands at 0.
 function assertSettles(balances, payments) {
@@ -160,4 +160,33 @@ test('payment count never exceeds n - 1', () => {
   const payments = minimize(balances);
   assertSettles(balances, payments);
   assert.ok(payments.length <= Object.keys(balances).length - 1);
+});
+
+test('chipPayouts: whole-dollar rate converts exactly', () => {
+  // $20 = 200 chips; 4 buy-ins = $80 = 800 chips
+  const p = chipPayouts([{ id: 'a', chips: 350 }, { id: 'b', chips: 250 }, { id: 'c', chips: 200 }, { id: 'd', chips: 0 }], 20, 200);
+  assert.deepEqual(p, { a: 35, b: 25, c: 20, d: 0 });
+});
+
+test('chipPayouts: cents round so payouts still sum to the pot', () => {
+  // $20 = 200 chips ($0.10 each); 3 buy-ins = $60 = 600 chips
+  const stacks = [{ id: 'a', chips: 347 }, { id: 'b', chips: 186 }, { id: 'c', chips: 67 }];
+  const p = chipPayouts(stacks, 20, 200); // exact 34.7, 18.6, 6.7
+  assert.equal(p.a + p.b + p.c, 60);
+  assert.deepEqual(p, { a: 35, b: 18, c: 7 });
+});
+
+test('chipPayouts: every stack is within $1 of its exact value', () => {
+  for (let trial = 0; trial < 300; trial++) {
+    const dollars = 1 + Math.floor(Math.random() * 50), count = 1 + Math.floor(Math.random() * 500);
+    const n = 2 + Math.floor(Math.random() * 8);
+    // build a balanced table: whole buy-ins, chips redistributed randomly
+    const totalChips = n * count;
+    const cuts = Array.from({ length: n - 1 }, () => Math.floor(Math.random() * (totalChips + 1))).sort((a, b) => a - b);
+    const chips = [...cuts, totalChips].map((c, i) => c - (i ? cuts[i - 1] : 0));
+    const p = chipPayouts(chips.map((c, i) => ({ id: 'p' + i, chips: c })), dollars, count);
+    const vals = Object.values(p);
+    assert.equal(vals.reduce((a, b) => a + b, 0), n * dollars);
+    chips.forEach((c, i) => assert.ok(Math.abs(p['p' + i] - (c * dollars) / count) < 1));
+  }
 });

@@ -280,6 +280,24 @@ function presetSplit(pot, pcts) {
   return shares;
 }
 
+// Cash-game chip counts -> whole-dollar payouts at a rate of `dollars` per
+// `count` chips. stacks: [{ id, chips }]. Each exact value is floored and the
+// leftover dollars go to the largest fractional remainders (ties: bigger stack),
+// so the payouts sum to the exact total whenever that total is whole dollars.
+function chipPayouts(stacks, dollars, count) {
+  const rows = stacks.map((s, i) => {
+    const num = (s.chips || 0) * dollars;
+    return { id: s.id, i, chips: s.chips || 0, base: Math.floor(num / count), rem: num % count };
+  });
+  const totalNum = rows.reduce((t, r) => t + r.chips, 0) * dollars;
+  let left = Math.round(totalNum / count) - rows.reduce((t, r) => t + r.base, 0);
+  const order = [...rows].sort((a, b) => (b.rem - a.rem) || (b.chips - a.chips) || (a.i - b.i));
+  for (const r of order) { if (left <= 0) break; if (r.rem > 0) { r.base += 1; left -= 1; } }
+  const out = {};
+  for (const r of rows) out[r.id] = r.base;
+  return out;
+}
+
 // ---------- helpers ----------
 const $ = (sel, el = document) => el.querySelector(sel);
 const el = (tag, props = {}, kids = []) => {
@@ -353,8 +371,14 @@ function moneyControl(initial, onSet, cls, pid) {
 const PRESET_GAMES = [
   '3s & 9s', '3-5-7', '5 Card Draw', '5 Card Stud', 'Hi-Low', 'Razz',
   'Kings and Little Men', 'High Card', 'Low-Chi', "Hold 'Em",
-  'Yahtzee', 'Screw Your Neighbor',
+  'Yahtzee', 'Screw Your Neighbor', 'Poker (cash game)', 'Omaha',
 ];
+// Games that default to chip-count scoring the first time they're logged.
+const CHIP_GAME_RE = /hold\W*em|omaha|poker|cash game/i;
+// Display dollars with cents only when there are cents: 34.7 -> "$34.70", 35 -> "$35".
+const cents = (x) => { const r = Math.round(x * 100) / 100; const a = Math.abs(r); return (r < 0 ? '-' : '') + '$' + (Number.isInteger(a) ? a : a.toFixed(2)); };
+const signedCents = (x) => (Math.round(x * 100) > 0 ? '+' : '') + cents(x);
+const fmtChips = (n) => (Number.isInteger(n) ? n : Math.round(n * 100) / 100).toLocaleString();
 // Preset + saved custom games, de-duplicated (case-sensitive on stored form).
 const allGameNames = () => Array.from(new Set([...PRESET_GAMES, ...state.customGames]));
 const isKnownGame = (n) => PRESET_GAMES.includes(n) || state.customGames.includes(n);
@@ -607,15 +631,27 @@ async function addPlayerReturning(name) {
   scheduleRefetch();
   return error ? null : data;
 }
-async function saveGame({ id, name, buyin, played_at, lines }) {
+async function saveGame({ id, name, buyin, played_at, lines, mode, chip_dollars, chip_count }) {
+  const fields = { name, buyin, played_at, mode, chip_dollars, chip_count };
+  // Show the save immediately so reopening the game right away (e.g. to add a
+  // rebuy) edits this version, not the pre-save copy still awaiting refetch.
+  const showLocally = (gid) => {
+    const local = { ...fields, id: gid, trip_id: state.tripId, lines: lines.map((l) => ({ ...l, game_id: gid })) };
+    const i = state.games.findIndex((g) => g.id === gid);
+    if (i >= 0) state.games[i] = { ...state.games[i], ...local }; else state.games.unshift(local);
+    state.games.sort((a, b) => (a.played_at < b.played_at ? 1 : -1));
+    render();
+  };
   if (id) {
-    await dbw(() => db.from('games').update({ name, buyin, played_at }).eq('id', id), 'Save game');
+    showLocally(id);
+    await dbw(() => db.from('games').update(fields).eq('id', id), 'Save game');
     await dbw(() => db.from('game_lines').delete().eq('game_id', id), 'Save game');
     await dbw(() => db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: id }))), 'Save game');
   } else {
     const { data, error } = await dbw(() => db.from('games')
-      .insert({ trip_id: state.tripId, name, buyin, played_at }).select().single(), 'Save game');
+      .insert({ trip_id: state.tripId, ...fields }).select().single(), 'Save game');
     if (error || !data) return;
+    showLocally(data.id);
     await dbw(() => db.from('game_lines').insert(lines.map((l) => ({ ...l, game_id: data.id }))), 'Save game');
   }
   await rememberGameName(name); // custom names are retained for future games/trips
@@ -1061,6 +1097,7 @@ function renderGames() {
       const winner = g.lines.filter((l) => l.payout - l.contribution > 0)
         .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
       const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
+      if (g.mode === 'chips') meta.push('🪙 cash game');
       if (paid === 0) meta.push('⏳ in progress');
       else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
       if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
@@ -1414,13 +1451,28 @@ function openGameModal(game) {
   const contribs = {}; // player_id -> total contribution (buy-in + rebuys)
   const payouts = {};  // player_id -> payout
   let winnerId = null;
-  let manual = false;
+  // 'winner' = winner takes all · 'split' = edit payouts · 'chips' = cash game by chip count
+  let mode = 'winner';
+  let modeTouched = editing;
+  const chips = {}; // player_id -> ending chip count (null = not counted yet)
+  const lastChip = state.games.find((g) => g.mode === 'chips' && g.chip_dollars && g.chip_count);
+  let chipDollars = (game && game.chip_dollars) || (lastChip ? lastChip.chip_dollars : 20);
+  let chipCount = (game && game.chip_count) || (lastChip ? lastChip.chip_count : 20);
   if (game) {
-    for (const l of game.lines) { payouts[l.player_id] = l.payout; contribs[l.player_id] = l.contribution; }
+    for (const l of game.lines) {
+      payouts[l.player_id] = l.payout; contribs[l.player_id] = l.contribution;
+      if (l.chips != null) chips[l.player_id] = l.chips;
+    }
     const winners = game.lines.filter((l) => l.payout > 0);
     winnerId = winners.length === 1 ? winners[0].player_id : null;
-    manual = winners.length > 1; // multiple winners => split view; else winner-takes-all view
+    mode = game.mode || (winners.length > 1 ? 'split' : 'winner'); // older games: infer from payouts
   }
+  // A new game defaults to how this game was last scored on the trip, else chips for poker.
+  function defaultModeFor(n) {
+    const prev = state.games.find((g) => g.name === n && g.mode);
+    return prev ? prev.mode : (CHIP_GAME_RE.test(n) ? 'chips' : 'winner');
+  }
+  const isSplit = () => mode === 'split';
 
   // Clicking outside the sheet must never silently discard entries: if anything
   // has been entered, ask first; an untouched modal just closes.
@@ -1456,14 +1508,23 @@ function openGameModal(game) {
   }
   function rebuild() { modal.innerHTML = ''; build(); }
 
-  const isInProgress = () => (manual ? totalPayout() === 0 : !winnerId);
+  // ---- chip-count (cash game) math ----
+  const perChip = () => chipDollars / chipCount;
+  const chipsSold = () => (pot() * chipCount) / chipDollars;
+  const chipsCounted = () => selPlayers().reduce((s, p) => s + (chips[p.id] || 0), 0);
+  const anyCounted = () => selPlayers().some((p) => chips[p.id] != null);
+  // Exact integer comparison: counted chips are worth exactly the pot.
+  const chipsBalanced = () => anyCounted() && pot() > 0 && chipsCounted() * chipDollars === pot() * chipCount;
+  const chipPayoutMap = () => chipPayouts(selPlayers().map((p) => ({ id: p.id, chips: chips[p.id] || 0 })), chipDollars, chipCount);
+
+  const isInProgress = () => (mode === 'chips' ? !chipsBalanced() : isSplit() ? totalPayout() === 0 : !winnerId);
 
   function build() {
     // top bar
     modal.append(el('div', { class: 'bar' }, [
       el('button', { class: 'btn ghost small', text: 'Cancel', onclick: () => bg.remove() }),
       el('div', { class: 'grow', style: 'text-align:center' }, [el('h2', { text: editing ? 'Edit game' : 'New game' })]),
-      el('button', { class: 'btn small', text: selected.size >= 2 && isInProgress() ? 'Save (open)' : 'Save', onclick: onSave }),
+      el('button', { class: 'btn small savebtn', text: saveLabel(), onclick: onSave }),
     ]));
 
     // fields — game name: dropdown of common games + a custom "Other…" option
@@ -1475,6 +1536,7 @@ function openGameModal(game) {
     nameSel.addEventListener('change', (e) => {
       nameChoice = e.target.value;
       name = nameChoice === '__other__' ? (isKnownGame(name) ? '' : name) : nameChoice;
+      if (!modeTouched && name) { mode = defaultModeFor(name); if (isSplit()) seedManual(); }
       rebuild();
     });
     modal.append(el('label', { class: 'field', text: 'Game' }), nameSel);
@@ -1488,14 +1550,38 @@ function openGameModal(game) {
       oninput: (e) => { const d = new Date(e.target.value); if (!isNaN(d)) when = d; } });
     modal.append(el('label', { class: 'field', text: 'Time' }), dt);
 
+    // how the game is scored
+    modal.append(el('label', { class: 'field', text: 'How is it scored?' }));
+    const seg = el('div', { class: 'inline', style: 'margin-top:6px;gap:6px' });
+    for (const [k, label] of [['winner', '👑 Winner takes all'], ['split', '➗ Split pot'], ['chips', '🪙 Chip count']]) {
+      seg.append(el('button', { class: 'btn small ' + (mode === k ? '' : 'ghost'), style: 'flex:1;padding:8px 4px', text: label,
+        onclick: () => { mode = k; modeTouched = true; if (isSplit()) seedManual(); rebuild(); } }));
+    }
+    modal.append(seg);
+
+    if (mode === 'chips') {
+      const numStyle = 'width:72px;flex:none;text-align:center;margin-top:0;padding:8px 4px';
+      const dIn = el('input', { class: 'inp chipdollars', type: 'number', min: '1', step: '1', inputmode: 'numeric', value: String(chipDollars), style: numStyle,
+        oninput: (e) => { const v = Math.round(parseFloat(e.target.value)); if (v > 0) { chipDollars = v; updateTotals(); } } });
+      const cIn = el('input', { class: 'inp chipcount', type: 'number', min: '1', step: '1', inputmode: 'numeric', value: String(chipCount), style: numStyle,
+        oninput: (e) => { const v = Math.round(parseFloat(e.target.value)); if (v > 0) { chipCount = v; updateTotals(); } } });
+      modal.append(el('div', { class: 'card', style: 'margin-top:10px;padding:10px 12px' }, [
+        el('div', { style: 'font-weight:700', text: 'Chip rate — set before anyone buys in' }),
+        el('div', { class: 'inline', style: 'margin-top:8px;gap:8px;align-items:center' }, [
+          el('span', { text: '$' }), dIn, el('span', { text: 'buys' }), cIn, el('span', { text: 'chips' }),
+        ]),
+        el('div', { class: 'muted perchip', style: 'margin-top:6px', text: '= ' + cents(perChip()) + ' per chip' }),
+      ]));
+    }
+
     // participants — each selected player carries their own buy-in amount
     modal.append(el('div', { class: 'section-h potline', text: 'Who played · pot ' + money(pot()) }));
     for (const p of state.players) {
       const sel = selected.has(p.id);
       const toggle = () => {
-        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; if (winnerId === p.id) winnerId = null; }
-        else { selected.add(p.id); contribs[p.id] = stake; } // new players start at the last-used amount
-        if (manual) seedManual();
+        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; delete chips[p.id]; if (winnerId === p.id) winnerId = null; }
+        else { selected.add(p.id); contribs[p.id] = mode === 'chips' ? chipDollars : stake; } // chips: one buy-in; else last-used amount
+        if (isSplit()) seedManual();
         rebuild();
       };
       const row = el('div', { class: 'check' + (sel ? ' sel' : '') }, [
@@ -1506,10 +1592,23 @@ function openGameModal(game) {
         row.style.flexWrap = 'wrap';
         const ctl = moneyControl(contribOf(p.id), (v) => setAmt(p.id, v), 'buyamt', p.id);
         row.append(ctl.num, ctl.range);
+        if (mode === 'chips') {
+          row.append(el('div', { class: 'inline', style: 'width:100%;margin-top:6px;gap:8px' }, [
+            el('div', { class: 'grow muted', style: 'flex:1', 'data-bpid': p.id, text: fmtChips((contribOf(p.id) * chipCount) / chipDollars) + ' chips bought' }),
+            el('button', { class: 'btn ghost small rebuybtn', text: '＋ Rebuy ' + money(chipDollars), onclick: (e) => {
+              e.stopPropagation();
+              contribs[p.id] = contribOf(p.id) + chipDollars;
+              rebuild();
+              toast(p.name + ' rebought — now in for ' + money(contribs[p.id]));
+            } }),
+          ]));
+        }
       }
       modal.append(row);
     }
-    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: 'Slide for $5 steps — drag slowly for $1 — or type an exact amount. Rebuy = raise that player\'s total.' }));
+    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: mode === 'chips'
+      ? 'Each player\'s total buy-in. Tap ＋ Rebuy when someone buys more chips, or type the total.'
+      : 'Slide for $5 steps — drag slowly for $1 — or type an exact amount. Rebuy = raise that player\'s total.' }));
     // Inline add-player (so you can build the roster right here if nobody's added yet)
     const addBuf = { v: '' };
     const doAddPlayer = async () => {
@@ -1519,7 +1618,8 @@ function openGameModal(game) {
         if (!state.players.some((x) => x.id === p.id)) state.players.push(p);
         state.players.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
         selected.add(p.id);
-        if (manual) seedManual();
+        if (mode === 'chips') contribs[p.id] = chipDollars; // otherwise unset = follows the last-typed buy-in
+        if (isSplit()) seedManual();
         rebuild();
       }
     };
@@ -1532,7 +1632,29 @@ function openGameModal(game) {
     ]));
 
     if (selected.size >= 2) {
-      if (!manual) {
+      if (mode === 'chips') {
+        modal.append(el('div', { class: 'section-h', text: 'Ending chip counts' }));
+        for (const p of selPlayers()) {
+          const inp = el('input', { class: 'inp chipin', type: 'number', min: '0', step: '1', inputmode: 'numeric', 'data-cid': p.id,
+            value: chips[p.id] != null ? String(chips[p.id]) : '', placeholder: 'chips',
+            style: 'width:90px;flex:none;text-align:center;margin-top:0;padding:8px 4px',
+            oninput: (e) => {
+              const raw = e.target.value.trim();
+              if (raw === '') delete chips[p.id];
+              else chips[p.id] = Math.max(0, Math.round(parseFloat(raw) || 0));
+              updateTotals();
+            } });
+          modal.append(el('div', { class: 'check', style: 'flex-wrap:wrap' }, [
+            el('div', { class: 'grow' }, [
+              el('div', { class: 'title', text: p.name }),
+              el('div', { class: 'muted', 'data-cpid': p.id }),
+            ]),
+            inp,
+          ]));
+        }
+        modal.append(el('div', { class: 'chipbal', style: 'margin-top:10px' }));
+        modal.append(el('div', { class: 'muted chiproundnote', style: 'margin-top:6px' }));
+      } else if (!isSplit()) {
         modal.append(el('div', { class: 'section-h', text: 'Winner — takes the whole pot' }));
         for (const p of selPlayers()) {
           const isW = winnerId === p.id;
@@ -1597,12 +1719,6 @@ function openGameModal(game) {
         }
         modal.append(el('div', { class: 'balanceline', style: 'margin-top:10px' }, [balanceLabel()]));
       }
-
-      const toggle = el('label', { class: 'check', style: 'margin-top:16px' }, [
-        el('div', { class: 'grow', text: 'Split the pot / edit amounts' }),
-        (() => { const c = el('input', { type: 'checkbox' }); c.checked = manual; c.addEventListener('change', () => { manual = c.checked; if (manual) seedManual(); rebuild(); }); return c; })(),
-      ]);
-      modal.append(toggle);
     } else {
       modal.append(el('div', { class: 'muted', style: 'margin-top:12px', text: 'Select at least 2 players.' }));
     }
@@ -1611,6 +1727,46 @@ function openGameModal(game) {
       modal.append(el('button', { class: 'btn ghost block', style: 'margin-top:18px;color:var(--neg)', text: 'Delete game',
         onclick: () => { if (confirm('Delete this game?')) { deleteGame(game.id); bg.remove(); } } }));
     }
+    updateTotals();
+  }
+
+  const saveLabel = () => (selected.size >= 2 && isInProgress() ? 'Save (open)' : 'Save');
+
+  function updateChips() {
+    const pc = $('.perchip', modal); if (pc) pc.textContent = '= ' + cents(perChip()) + ' per chip';
+    modal.querySelectorAll('.rebuybtn').forEach((b) => (b.textContent = '＋ Rebuy ' + money(chipDollars)));
+    modal.querySelectorAll('[data-bpid]').forEach((n) => {
+      n.textContent = fmtChips((contribOf(n.dataset.bpid) * chipCount) / chipDollars) + ' chips bought';
+    });
+    const balanced = chipsBalanced();
+    const settled = balanced ? chipPayoutMap() : null;
+    let rounded = false;
+    modal.querySelectorAll('[data-cpid]').forEach((n) => {
+      const pid = n.dataset.cpid;
+      const inFor = contribOf(pid);
+      if (chips[pid] == null) { n.className = 'muted'; n.textContent = 'in for ' + money(inFor) + ' · not counted yet'; return; }
+      const worth = chips[pid] * perChip();
+      const net = worth - inFor;
+      let txt = 'worth ' + cents(worth) + ' · in for ' + money(inFor) + ' · ' + signedCents(net);
+      if (settled && settled[pid] !== worth) { rounded = true; txt += ' (settles ' + signed(settled[pid] - inFor) + ')'; }
+      n.className = net > 0.004 ? 'pos' : net < -0.004 ? 'neg' : 'zero';
+      n.textContent = txt;
+    });
+    const bal = $('.chipbal', modal);
+    if (bal) {
+      bal.innerHTML = '';
+      const sold = chipsSold(), counted = chipsCounted(), diff = counted - sold;
+      if (!anyCounted()) {
+        bal.append(el('span', { class: 'muted', text: fmtChips(sold) + ' chips in play (' + money(pot()) + '). Enter each stack at cash-out — busted players are 0 or blank.' }));
+      } else if (balanced) {
+        bal.append(el('span', { class: 'balance-ok', text: '✓ All ' + fmtChips(sold) + ' chips accounted for — ready to save' }));
+      } else {
+        bal.append(el('span', { class: 'balance-off', text: '⚠︎ Counted ' + fmtChips(counted) + ' of ' + fmtChips(sold) + ' chips — '
+          + fmtChips(Math.abs(diff)) + (diff < 0 ? ' short' : ' over') + ' (' + cents(Math.abs(diff) * perChip()) + '). Recount before finishing.' }));
+      }
+    }
+    const note = $('.chiproundnote', modal);
+    if (note) note.textContent = rounded ? 'Settle Up works in whole dollars — cents are rounded so the pot still balances exactly.' : '';
   }
 
   function balanceLabel() {
@@ -1622,6 +1778,8 @@ function openGameModal(game) {
   function updateTotals() {
     const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
     const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
+    const sb = $('.savebtn', modal); if (sb) sb.textContent = saveLabel();
+    if (mode === 'chips') updateChips();
     // Winner-screen net / "in for" labels (buy-in amounts are inputs and manage themselves)
     modal.querySelectorAll('[data-npid]').forEach((n) => {
       const pid = n.dataset.npid;
@@ -1640,7 +1798,22 @@ function openGameModal(game) {
     if (!name.trim()) { toast('Pick or name the game'); return; }
     if (selected.size < 2) { toast('Pick at least 2 players'); return; }
     let lines;
-    if (manual) {
+    if (mode === 'chips') {
+      if (pot() <= 0) { toast('Enter buy-ins first'); return; }
+      const chipOf = (id) => (chips[id] != null ? chips[id] : null);
+      if (chipsBalanced()) {
+        const pay = chipPayoutMap();
+        lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: pay[p.id] || 0, chips: chips[p.id] || 0 }));
+      } else {
+        if (anyCounted()) {
+          const diff = chipsCounted() - chipsSold();
+          const ok = confirm('Chip counts don\'t balance — ' + fmtChips(Math.abs(diff)) + ' chips ' + (diff < 0 ? 'short' : 'over')
+            + ' (' + cents(Math.abs(diff) * perChip()) + ').\n\nSave as IN PROGRESS? It won\'t count toward Settle Up until the counts balance.');
+          if (!ok) return;
+        }
+        lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: 0, chips: chipOf(p.id) }));
+      }
+    } else if (isSplit()) {
       const tp = totalPayout();
       if (tp > 0 && tp !== pot()) { toast('Payouts must equal the pot, or clear them to save in progress'); return; }
       // tp === 0 => saved in progress; tp === pot => finalized split
@@ -1649,7 +1822,9 @@ function openGameModal(game) {
       // Winner set => winner-takes-all; no winner => open game (no payouts yet)
       lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: (winnerId && p.id === winnerId) ? pot() : 0 }));
     }
-    saveGame({ id: game ? game.id : null, name: name.trim(), buyin: stake, played_at: when.toISOString(), lines });
+    const isChips = mode === 'chips';
+    saveGame({ id: game ? game.id : null, name: name.trim(), buyin: isChips ? chipDollars : stake, played_at: when.toISOString(), lines,
+      mode, chip_dollars: isChips ? chipDollars : null, chip_count: isChips ? chipCount : null });
     bg.remove();
   }
 

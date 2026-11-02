@@ -113,3 +113,21 @@ export function presetSplit(pot, pcts) {
   shares[0] += pot - shares.reduce((a, b) => a + b, 0);
   return shares;
 }
+
+// Cash-game chip counts -> whole-dollar payouts at a rate of `dollars` per
+// `count` chips. stacks: [{ id, chips }]. Each exact value is floored and the
+// leftover dollars go to the largest fractional remainders (ties: bigger stack),
+// so the payouts sum to the exact total whenever that total is whole dollars.
+export function chipPayouts(stacks, dollars, count) {
+  const rows = stacks.map((s, i) => {
+    const num = (s.chips || 0) * dollars;
+    return { id: s.id, i, chips: s.chips || 0, base: Math.floor(num / count), rem: num % count };
+  });
+  const totalNum = rows.reduce((t, r) => t + r.chips, 0) * dollars;
+  let left = Math.round(totalNum / count) - rows.reduce((t, r) => t + r.base, 0);
+  const order = [...rows].sort((a, b) => (b.rem - a.rem) || (b.chips - a.chips) || (a.i - b.i));
+  for (const r of order) { if (left <= 0) break; if (r.rem > 0) { r.base += 1; left -= 1; } }
+  const out = {};
+  for (const r of rows) out[r.id] = r.base;
+  return out;
+}
