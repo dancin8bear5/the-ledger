@@ -966,6 +966,8 @@ function renderGames() {
         .sort((a, b) => (b.payout - b.contribution) - (a.payout - a.contribution))[0];
       const meta = [fmtTime(g.played_at), g.lines.length + ' players'];
       if (g.mode === 'chips') meta.push('🪙 cash game');
+      const rb = g.lines.reduce((s, l) => s + (l.rebuys || 0), 0);
+      if (rb) meta.push('🔁 ' + rb + ' rebuy' + (rb === 1 ? '' : 's'));
       if (paid === 0) meta.push('⏳ in progress');
       else if (winner) meta.push('👑 ' + (nameById[winner.player_id] || '?'));
       if (paid !== 0 && pot !== paid) meta.push('⚠︎ unbalanced');
@@ -1323,6 +1325,7 @@ function openGameModal(game) {
   let mode = 'winner';
   let modeTouched = editing;
   const chips = {}; // player_id -> ending chip count (null = not counted yet)
+  const rebuys = {}; // player_id -> number of rebuys (already included in contribs)
   const lastChip = state.games.find((g) => g.mode === 'chips' && g.chip_dollars && g.chip_count);
   let chipDollars = (game && game.chip_dollars) || (lastChip ? lastChip.chip_dollars : 20);
   let chipCount = (game && game.chip_count) || (lastChip ? lastChip.chip_count : 20);
@@ -1330,6 +1333,7 @@ function openGameModal(game) {
     for (const l of game.lines) {
       payouts[l.player_id] = l.payout; contribs[l.player_id] = l.contribution;
       if (l.chips != null) chips[l.player_id] = l.chips;
+      if (l.rebuys) rebuys[l.player_id] = l.rebuys;
     }
     const winners = game.lines.filter((l) => l.payout > 0);
     winnerId = winners.length === 1 ? winners[0].player_id : null;
@@ -1364,8 +1368,26 @@ function openGameModal(game) {
   // selected players. The money control manages its own display, so no rebuild.
   function setAmt(pid, v) {
     contribs[pid] = Math.max(0, Math.round(v || 0));
-    stake = contribs[pid];
+    if (!rebuys[pid]) stake = contribs[pid]; // a rebuyer's running total isn't the game's buy-in
     updateTotals();
+  }
+  // One rebuy = one more buy-in: the chip rate's dollars in a cash game, else the game's buy-in.
+  const rebuyAmt = () => (mode === 'chips' ? chipDollars : stake);
+  function addRebuy(p) {
+    const amt = rebuyAmt();
+    if (!(amt > 0)) { toast('Set the buy-in amount first'); return; }
+    contribs[p.id] = contribOf(p.id) + amt;
+    rebuys[p.id] = (rebuys[p.id] || 0) + 1;
+    rebuild();
+    toast(p.name + ' rebought — now in for ' + money(contribs[p.id]));
+  }
+  function undoRebuy(p) {
+    if (!rebuys[p.id]) return;
+    contribs[p.id] = Math.max(0, contribOf(p.id) - rebuyAmt());
+    rebuys[p.id] -= 1;
+    if (!rebuys[p.id]) delete rebuys[p.id];
+    rebuild();
+    toast('Removed a rebuy — ' + p.name + ' now in for ' + money(contribs[p.id]));
   }
   const selPlayers = () => state.players.filter((p) => selected.has(p.id));
   const pot = () => selPlayers().reduce((s, p) => s + contribOf(p.id), 0);
@@ -1447,7 +1469,7 @@ function openGameModal(game) {
     for (const p of state.players) {
       const sel = selected.has(p.id);
       const toggle = () => {
-        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; delete chips[p.id]; if (winnerId === p.id) winnerId = null; }
+        if (selected.has(p.id)) { selected.delete(p.id); delete payouts[p.id]; delete contribs[p.id]; delete chips[p.id]; delete rebuys[p.id]; if (winnerId === p.id) winnerId = null; }
         else { selected.add(p.id); contribs[p.id] = mode === 'chips' ? chipDollars : stake; } // chips: one buy-in; else last-used amount
         if (isSplit()) seedManual();
         rebuild();
@@ -1460,23 +1482,20 @@ function openGameModal(game) {
         row.style.flexWrap = 'wrap';
         const ctl = moneyControl(contribOf(p.id), (v) => setAmt(p.id, v), 'buyamt', p.id);
         row.append(ctl.num, ctl.range);
-        if (mode === 'chips') {
-          row.append(el('div', { class: 'inline', style: 'width:100%;margin-top:6px;gap:8px' }, [
-            el('div', { class: 'grow muted', style: 'flex:1', 'data-bpid': p.id, text: fmtChips((contribOf(p.id) * chipCount) / chipDollars) + ' chips bought' }),
-            el('button', { class: 'btn ghost small rebuybtn', text: '＋ Rebuy ' + money(chipDollars), onclick: (e) => {
-              e.stopPropagation();
-              contribs[p.id] = contribOf(p.id) + chipDollars;
-              rebuild();
-              toast(p.name + ' rebought — now in for ' + money(contribs[p.id]));
-            } }),
-          ]));
-        }
+        const n = rebuys[p.id] || 0;
+        const info = [];
+        if (n) info.push('🔁 ' + n + ' rebuy' + (n === 1 ? '' : 's'));
+        if (mode === 'chips') info.push(fmtChips((contribOf(p.id) * chipCount) / chipDollars) + ' chips bought');
+        row.append(el('div', { class: 'inline', style: 'width:100%;margin-top:6px;gap:8px' }, [
+          el('div', { class: 'grow muted rebuyinfo', style: 'flex:1', 'data-bpid': p.id, text: info.join(' · ') }),
+          n ? el('button', { class: 'btn ghost small undorebuy', title: 'Undo one rebuy', text: '− Undo', onclick: (e) => { e.stopPropagation(); undoRebuy(p); } }) : null,
+          el('button', { class: 'btn ghost small rebuybtn', text: '＋ Rebuy ' + money(rebuyAmt()), onclick: (e) => { e.stopPropagation(); addRebuy(p); } }),
+        ]));
       }
       modal.append(row);
     }
-    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: mode === 'chips'
-      ? 'Each player\'s total buy-in. Tap ＋ Rebuy when someone buys more chips, or type the total.'
-      : 'Slide for $5 steps — drag slowly for $1 — or type an exact amount. Rebuy = raise that player\'s total.' }));
+    if (selected.size) modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text:
+      'The amount is each player\'s TOTAL in. Tap ＋ Rebuy each time someone buys back in (− Undo fixes a mis-tap), or type a total.' }));
     // Inline add-player (so you can build the roster right here if nobody's added yet)
     const addBuf = { v: '' };
     const doAddPlayer = async () => {
@@ -1602,10 +1621,6 @@ function openGameModal(game) {
 
   function updateChips() {
     const pc = $('.perchip', modal); if (pc) pc.textContent = '= ' + cents(perChip()) + ' per chip';
-    modal.querySelectorAll('.rebuybtn').forEach((b) => (b.textContent = '＋ Rebuy ' + money(chipDollars)));
-    modal.querySelectorAll('[data-bpid]').forEach((n) => {
-      n.textContent = fmtChips((contribOf(n.dataset.bpid) * chipCount) / chipDollars) + ' chips bought';
-    });
     const balanced = chipsBalanced();
     const settled = balanced ? chipPayoutMap() : null;
     let rounded = false;
@@ -1647,6 +1662,13 @@ function openGameModal(game) {
     const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
     const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
     const sb = $('.savebtn', modal); if (sb) sb.textContent = saveLabel();
+    modal.querySelectorAll('.rebuybtn').forEach((b) => (b.textContent = '＋ Rebuy ' + money(rebuyAmt())));
+    modal.querySelectorAll('[data-bpid]').forEach((el2) => {
+      const pid = el2.dataset.bpid, n = rebuys[pid] || 0, info = [];
+      if (n) info.push('🔁 ' + n + ' rebuy' + (n === 1 ? '' : 's'));
+      if (mode === 'chips') info.push(fmtChips((contribOf(pid) * chipCount) / chipDollars) + ' chips bought');
+      el2.textContent = info.join(' · ');
+    });
     if (mode === 'chips') updateChips();
     // Winner-screen net / "in for" labels (buy-in amounts are inputs and manage themselves)
     modal.querySelectorAll('[data-npid]').forEach((n) => {
@@ -1690,6 +1712,7 @@ function openGameModal(game) {
       // Winner set => winner-takes-all; no winner => open game (no payouts yet)
       lines = selPlayers().map((p) => ({ player_id: p.id, contribution: contribOf(p.id), payout: (winnerId && p.id === winnerId) ? pot() : 0 }));
     }
+    lines = lines.map((l) => ({ ...l, rebuys: rebuys[l.player_id] || 0 }));
     const isChips = mode === 'chips';
     saveGame({ id: game ? game.id : null, name: name.trim(), buyin: isChips ? chipDollars : stake, played_at: when.toISOString(), lines,
       mode, chip_dollars: isChips ? chipDollars : null, chip_count: isChips ? chipCount : null });
