@@ -950,7 +950,7 @@ function renderHeader() {
       el('h1', { text: '🐻 ' + state.trip.name }),
       el('div', { class: 'sub', text: 'Code ' + (state.trip.code || '—') + ' · ' + state.players.length + ' players' }),
     ]),
-    el('button', { class: 'btn small', title: 'Add game', text: '＋', disabled: state.players.length ? null : 'true',
+    el('button', { class: 'btn small', title: 'Add game', text: '＋',
       style: 'font-size:16px;font-weight:800;padding:7px 13px', onclick: () => openGameModal(null) }),
     el('button', { class: 'btn small', text: 'Share', onclick: async () => {
       try {
@@ -1013,7 +1013,15 @@ function renderPlayers() {
 
 function renderGames() {
   const box = el('div', {});
-  if (!state.players.length) { box.append(el('div', { class: 'empty', text: 'Add players first (Players tab).' })); return box; }
+  if (!state.players.length) {
+    box.append(el('div', { class: 'empty' }, [
+      el('div', { class: 'big', text: '🏈' }),
+      el('div', { text: 'No players yet.' }),
+      el('div', { class: 'muted', style: 'margin-top:4px', text: 'Add them on the Players tab, or tap ＋ above — the game screen lets you add players on the spot too.' }),
+      el('button', { class: 'btn ghost small', style: 'margin-top:10px', text: 'Go to Players', onclick: () => { state.tab = 'players'; render(); } }),
+    ]));
+    return box;
+  }
 
   box.append(el('button', { class: 'btn ghost block', style: 'margin-top:12px', text: '💵 Log cash handoff / shared expense',
     onclick: () => {
