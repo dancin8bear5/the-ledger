@@ -1,7 +1,7 @@
 // Node-runnable tests for the settlement engine. Run: node tests/settlement.test.mjs
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { netBalances, minimize, residual, pairwiseFlows, presetSplit, chipPayouts } from '../settlement.mjs';
+import { netBalances, minimize, residual, pairwiseFlows, presetSplit, chipPayouts, proportionalSplit, sidePots } from '../settlement.mjs';
 
 // Apply payments to a copy of balances and assert everyone lands at 0.
 function assertSettles(balances, payments) {
@@ -188,5 +188,52 @@ test('chipPayouts: every stack is within $1 of its exact value', () => {
     const vals = Object.values(p);
     assert.equal(vals.reduce((a, b) => a + b, 0), n * dollars);
     chips.forEach((c, i) => assert.ok(Math.abs(p['p' + i] - (c * dollars) / count) < 1));
+  }
+});
+
+test('proportionalSplit: chop by buy-in', () => {
+  assert.deepEqual(proportionalSplit(100, [{ id: 'jared', w: 50 }, { id: 'bill', w: 20 }]), { jared: 71, bill: 29 });
+  assert.deepEqual(proportionalSplit(90, [{ id: 'a', w: 30 }, { id: 'b', w: 30 }, { id: 'c', w: 30 }]), { a: 30, b: 30, c: 30 });
+  assert.deepEqual(proportionalSplit(10, [{ id: 'a', w: 0 }, { id: 'b', w: 0 }]), { a: 5, b: 5 });
+});
+
+test('proportionalSplit: always sums to the pot, each share within $1 of exact', () => {
+  for (let t = 0; t < 300; t++) {
+    const pot = Math.floor(Math.random() * 1000);
+    const ws = Array.from({ length: 1 + Math.floor(Math.random() * 6) }, (_, i) => ({ id: 'p' + i, w: 1 + Math.floor(Math.random() * 100) }));
+    const out = proportionalSplit(pot, ws);
+    const tot = ws.reduce((s, x) => s + x.w, 0);
+    assert.equal(Object.values(out).reduce((a, b) => a + b, 0), pot);
+    for (const x of ws) assert.ok(Math.abs(out[x.id] - (pot * x.w) / tot) < 1);
+  }
+});
+
+test('sidePots: short stack wins only what he covered', () => {
+  const e = [{ id: 'jared', c: 50 }, { id: 'ryan', c: 30 }, { id: 'bill', c: 20 }];
+  const r = sidePots(e, ['bill', 'jared']);
+  assert.deepEqual(r.payouts, { jared: 40, ryan: 0, bill: 60 }); // main $60 → Bill; side $20 → Jared; Jared's extra $20 back
+  assert.equal(r.unresolved, 0);
+  assert.deepEqual(r.pots.map((p) => [p.amount, p.winner, p.refund]), [[60, 'bill', false], [20, 'jared', false], [20, 'jared', true]]);
+});
+
+test('sidePots: partial ranking leaves later pots unresolved', () => {
+  const e = [{ id: 'jared', c: 50 }, { id: 'ryan', c: 30 }, { id: 'bill', c: 20 }];
+  const r = sidePots(e, ['bill']);
+  assert.equal(r.unresolved, 1);
+  assert.equal(r.payouts.bill, 60);
+  assert.deepEqual(sidePots(e, ['jared']).payouts, { jared: 100, ryan: 0, bill: 0 }); // big stack wins all
+});
+
+test('sidePots: equal entries = winner takes all; random tables balance and respect the cap', () => {
+  assert.deepEqual(sidePots([{ id: 'a', c: 20 }, { id: 'b', c: 20 }], ['b']).payouts, { a: 0, b: 40 });
+  for (let t = 0; t < 300; t++) {
+    const n = 2 + Math.floor(Math.random() * 6);
+    const e = Array.from({ length: n }, (_, i) => ({ id: 'p' + i, c: 1 + Math.floor(Math.random() * 10) * 5 }));
+    const order = e.map((x) => x.id).sort(() => Math.random() - 0.5);
+    const r = sidePots(e, order);
+    assert.equal(r.unresolved, 0);
+    assert.equal(Object.values(r.payouts).reduce((a, b) => a + b, 0), e.reduce((s, x) => s + x.c, 0));
+    // nobody wins more from the table than everyone's stake capped at their own
+    for (const x of e) assert.ok(r.payouts[x.id] <= e.reduce((s, y) => s + Math.min(y.c, x.c), 0) || r.pots.some((p) => p.refund && p.winner === x.id));
   }
 });

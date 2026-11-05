@@ -300,6 +300,45 @@ function chipPayouts(stacks, dollars, count) {
   return out;
 }
 
+// Chop a pot among winners in proportion to weights (e.g. what each winner put
+// in). weights: [{ id, w }]. Whole dollars; remainders go to the largest
+// fractions, so the shares always sum to the pot. All-zero weights split evenly.
+function proportionalSplit(pot, weights) {
+  const total = weights.reduce((s, x) => s + Math.max(0, x.w || 0), 0);
+  const ws = total > 0 ? weights.map((x) => ({ id: x.id, chips: Math.max(0, x.w || 0) })) : weights.map((x) => ({ id: x.id, chips: 1 }));
+  return chipPayouts(ws, pot, total > 0 ? total : weights.length);
+}
+
+// Poker side pots (all-in rule): a player can win from each opponent at most
+// what they themselves put in. entries: [{ id, c }] total put in per player;
+// order: player ids best finisher first (may be partial). Each layer of the pot
+// goes to the best-ranked player who covered it; a layer only one player
+// covered is returned to them. Layers with no ranked eligible player stay
+// unawarded and are counted in `unresolved`.
+function sidePots(entries, order) {
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const levels = [...new Set(entries.map((e) => e.c).filter((c) => c > 0))].sort((a, b) => a - b);
+  const payouts = Object.fromEntries(entries.map((e) => [e.id, 0]));
+  const pots = [];
+  let prev = 0, unresolved = 0;
+  for (const L of levels) {
+    const eligible = entries.filter((e) => e.c >= L).map((e) => e.id);
+    const amount = (L - prev) * eligible.length;
+    prev = L;
+    let winner = null, refund = false;
+    if (eligible.length === 1) { winner = eligible[0]; refund = true; }
+    else {
+      const ranked = eligible.filter((id) => rank.has(id)).sort((a, b) => rank.get(a) - rank.get(b));
+      winner = ranked.length ? ranked[0] : null;
+    }
+    if (winner == null) unresolved++; else payouts[winner] += amount;
+    const last = pots[pots.length - 1];
+    if (last && last.winner === winner && last.refund === refund && winner != null) last.amount += amount;
+    else pots.push({ amount, eligible, winner, refund });
+  }
+  return { payouts, pots, unresolved };
+}
+
 // ---------- helpers ----------
 const $ = (sel, el = document) => el.querySelector(sel);
 const el = (tag, props = {}, kids = []) => {
@@ -1616,6 +1655,34 @@ function openGameModal(game) {
   let pendingPcts = null;
   let presetLabel = null;
   let placeOrder = [];
+  // Entry-weighted splits: 'chop' = winners share in proportion to what each put in;
+  // 'side' = poker side pots (rank finishers; you only win what you covered).
+  let splitMethod = null;
+  let picks = [];
+  const sideResult = () => sidePots(selPlayers().map((p) => ({ id: p.id, c: contribOf(p.id) })), picks);
+  function applyMethod() {
+    if (!splitMethod) return;
+    for (const p of selPlayers()) payouts[p.id] = 0;
+    picks = picks.filter((id) => selected.has(id));
+    if (!picks.length) return;
+    const out = splitMethod === 'chop'
+      ? proportionalSplit(pot(), picks.map((id) => ({ id, w: contribOf(id) })))
+      : sideResult().payouts;
+    for (const [id, v] of Object.entries(out)) payouts[id] = v;
+  }
+  function methodSummary() {
+    const nm = (id) => (state.players.find((p) => p.id === id) || {}).name || '?';
+    if (splitMethod === 'chop') {
+      if (!picks.length) return 'Tap each winner below.';
+      return 'Chop by buy-in: ' + picks.map((id) => nm(id) + ' (in ' + money(contribOf(id)) + ') gets ' + money(payouts[id] || 0)).join(' · ');
+    }
+    if (!picks.length) return 'Tap finishers best-first, starting with the winner.';
+    const r = sideResult();
+    const parts = r.pots.map((pt, i) => pt.refund
+      ? money(pt.amount) + ' returned to ' + nm(pt.winner) + ' (nobody covered it)'
+      : (i === 0 ? 'Main pot ' : 'Side pot ') + money(pt.amount) + ' → ' + (pt.winner ? nm(pt.winner) : '?'));
+    return parts.join(' · ') + (r.unresolved ? ' — tap the next finisher (' + r.unresolved + ' pot' + (r.unresolved === 1 ? '' : 's') + ' left)' : ' ✓');
+  }
 
   const contribOf = (id) => (contribs[id] != null ? contribs[id] : stake);
   // Set a player's buy-in; the last edited amount becomes the default for newly
@@ -1650,7 +1717,7 @@ function openGameModal(game) {
   function seedManual() {
     for (const p of selPlayers()) if (payouts[p.id] == null) payouts[p.id] = p.id === winnerId ? pot() : 0;
   }
-  function rebuild() { modal.innerHTML = ''; build(); }
+  function rebuild() { if (splitMethod) applyMethod(); modal.innerHTML = ''; build(); }
 
   // ---- chip-count (cash game) math ----
   const perChip = () => chipDollars / chipCount;
@@ -1821,6 +1888,7 @@ function openGameModal(game) {
         for (const [label, pcts] of PRESETS) {
           const active = presetLabel === label;
           chipRow.append(el('button', { class: 'btn small ' + (active ? '' : 'ghost'), text: label, onclick: () => {
+            splitMethod = null; picks = [];
             if (active) { pendingPcts = null; presetLabel = null; placeOrder = []; rebuild(); return; }
             let chosen = pcts;
             if (!chosen) {
@@ -1835,25 +1903,48 @@ function openGameModal(game) {
             rebuild();
           } }));
         }
-        modal.append(chipRow);
+        const methodRow = el('div', { class: 'inline', style: 'flex-wrap:wrap;gap:6px;margin-top:6px' });
+        for (const [k, label] of [['chop', '⚖️ Chop by buy-in'], ['side', '🃏 Side pots']]) {
+          methodRow.append(el('button', { class: 'btn small methodbtn ' + (splitMethod === k ? '' : 'ghost'), text: label, onclick: () => {
+            pendingPcts = null; presetLabel = null; placeOrder = [];
+            if (splitMethod === k) { splitMethod = null; picks = []; } else { splitMethod = k; picks = []; for (const p of selPlayers()) payouts[p.id] = 0; }
+            rebuild();
+          } }));
+        }
+        modal.append(chipRow, methodRow);
+        if (splitMethod) {
+          modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: splitMethod === 'chop'
+            ? 'Tap each winner. The pot is split in proportion to what each winner put in — $50 in vs $20 in is a 5:2 split.'
+            : 'Tap players best-first. Each player can only win from each opponent up to what they put in themselves; the rest becomes a side pot for the next finisher.' }));
+          modal.append(el('div', { class: 'card methodsummary', style: 'margin-top:8px;padding:8px 12px;font-size:13px', text: methodSummary() }));
+        }
         if (pendingPcts) {
           modal.append(el('div', { class: 'muted', style: 'margin-top:6px', text: 'Tap players below in finishing order (' + pendingPcts.join('/') + '). Odd dollars go to 1st.' }));
         }
 
         const ord = (n) => n + (['st', 'nd', 'rd'][n - 1] || 'th');
         for (const p of selPlayers()) {
-          const placeIdx = placeOrder.indexOf(p.id);
-          const ctl = moneyControl(payouts[p.id] || 0, (v) => { payouts[p.id] = v; updateTotals(); }, 'payin', p.id);
-          modal.append(el('div', { class: 'check' + (placeIdx >= 0 ? ' sel' : ''), style: 'flex-wrap:wrap', onclick: (e) => {
-            if (e.target.tagName === 'INPUT' || !pendingPcts || placeOrder.includes(p.id)) return;
+          const placeIdx = splitMethod ? picks.indexOf(p.id) : placeOrder.indexOf(p.id);
+          const ctl = moneyControl(payouts[p.id] || 0, (v) => {
+            if (splitMethod) { splitMethod = null; picks = []; const ms = $('.methodsummary', modal); if (ms) ms.textContent = 'Edited by hand — tap a method again to recalculate.'; }
+            payouts[p.id] = v; updateTotals();
+          }, 'payin', p.id);
+          const badge = placeIdx < 0 ? null : splitMethod === 'chop' ? '⚖️' : ord(placeIdx + 1);
+          modal.append(el('div', { class: 'check payrowsplit' + (placeIdx >= 0 ? ' sel' : ''), style: 'flex-wrap:wrap', onclick: (e) => {
+            if (e.target.tagName === 'INPUT') return;
+            if (splitMethod) {
+              if (picks.includes(p.id)) picks = picks.filter((x) => x !== p.id); else picks.push(p.id);
+              applyMethod(); rebuild(); return;
+            }
+            if (!pendingPcts || placeOrder.includes(p.id)) return;
             placeOrder.push(p.id);
             const shares = presetSplit(pot(), pendingPcts);
             payouts[p.id] = shares[placeOrder.length - 1];
             if (placeOrder.length === pendingPcts.length) { pendingPcts = null; presetLabel = null; }
             rebuild();
           } }, [
-            placeIdx >= 0 ? el('span', { class: 'pos', style: 'font-weight:800;min-width:34px', text: ord(placeIdx + 1) }) : null,
-            el('div', { class: 'grow title', text: p.name }),
+            badge ? el('span', { class: 'pos', style: 'font-weight:800;min-width:34px', text: badge }) : null,
+            el('div', { class: 'grow' }, [el('div', { class: 'title', text: p.name }), el('div', { class: 'muted', style: 'font-size:12px', 'data-inpid': p.id, text: 'in ' + money(contribOf(p.id)) })]),
             ctl.num,
             ctl.range,
           ]));
@@ -1915,6 +2006,13 @@ function openGameModal(game) {
   function updateTotals() {
     const potline = $('.potline', modal); if (potline) potline.textContent = 'Who played · pot ' + money(pot());
     const bl = $('.balanceline', modal); if (bl) { bl.innerHTML = ''; bl.append(balanceLabel()); }
+    if (splitMethod && picks.length) {
+      applyMethod();
+      modal.querySelectorAll('input.payin').forEach((n) => { n.value = String(payouts[n.dataset.pid] || 0); });
+    }
+    const ms = $('.methodsummary', modal); if (ms && splitMethod) ms.textContent = methodSummary();
+    modal.querySelectorAll('[data-inpid]').forEach((n) => (n.textContent = 'in ' + money(contribOf(n.dataset.inpid))));
+    const bl2 = $('.balanceline', modal); if (bl2) { bl2.innerHTML = ''; bl2.append(balanceLabel()); }
     const sb = $('.savebtn', modal); if (sb) sb.textContent = saveLabel();
     modal.querySelectorAll('.rebuybtn').forEach((b) => (b.textContent = '＋ Rebuy ' + money(rebuyAmt())));
     modal.querySelectorAll('[data-bpid]').forEach((el2) => {

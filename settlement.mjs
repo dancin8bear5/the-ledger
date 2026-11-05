@@ -131,3 +131,42 @@ export function chipPayouts(stacks, dollars, count) {
   for (const r of rows) out[r.id] = r.base;
   return out;
 }
+
+// Chop a pot among winners in proportion to weights (e.g. what each winner put
+// in). weights: [{ id, w }]. Whole dollars; remainders go to the largest
+// fractions, so the shares always sum to the pot. All-zero weights split evenly.
+export function proportionalSplit(pot, weights) {
+  const total = weights.reduce((s, x) => s + Math.max(0, x.w || 0), 0);
+  const ws = total > 0 ? weights.map((x) => ({ id: x.id, chips: Math.max(0, x.w || 0) })) : weights.map((x) => ({ id: x.id, chips: 1 }));
+  return chipPayouts(ws, pot, total > 0 ? total : weights.length);
+}
+
+// Poker side pots (all-in rule): a player can win from each opponent at most
+// what they themselves put in. entries: [{ id, c }] total put in per player;
+// order: player ids best finisher first (may be partial). Each layer of the pot
+// goes to the best-ranked player who covered it; a layer only one player
+// covered is returned to them. Layers with no ranked eligible player stay
+// unawarded and are counted in `unresolved`.
+export function sidePots(entries, order) {
+  const rank = new Map(order.map((id, i) => [id, i]));
+  const levels = [...new Set(entries.map((e) => e.c).filter((c) => c > 0))].sort((a, b) => a - b);
+  const payouts = Object.fromEntries(entries.map((e) => [e.id, 0]));
+  const pots = [];
+  let prev = 0, unresolved = 0;
+  for (const L of levels) {
+    const eligible = entries.filter((e) => e.c >= L).map((e) => e.id);
+    const amount = (L - prev) * eligible.length;
+    prev = L;
+    let winner = null, refund = false;
+    if (eligible.length === 1) { winner = eligible[0]; refund = true; }
+    else {
+      const ranked = eligible.filter((id) => rank.has(id)).sort((a, b) => rank.get(a) - rank.get(b));
+      winner = ranked.length ? ranked[0] : null;
+    }
+    if (winner == null) unresolved++; else payouts[winner] += amount;
+    const last = pots[pots.length - 1];
+    if (last && last.winner === winner && last.refund === refund && winner != null) last.amount += amount;
+    else pots.push({ amount, eligible, winner, refund });
+  }
+  return { payouts, pots, unresolved };
+}
